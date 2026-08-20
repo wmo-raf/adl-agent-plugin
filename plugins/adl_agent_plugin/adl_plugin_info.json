@@ -1,0 +1,9 @@
+{
+  "name": "ADL Agent Plugin",
+  "description": "ADL server-side plugin for the ADL Agent: push-based file delivery from country servers",
+  "author": "WMO RAF",
+  "author_url": "https://github.com/wmo-raf",
+  "url": "https://github.com/wmo-raf/adl-agent-plugin",
+  "license": "MIT",
+  "contact": "eotenyo@wmo.int"
+}

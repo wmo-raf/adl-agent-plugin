@@ -1,0 +1,59 @@
+{% load i18n %}
+
+{% comment %}
+    Rendered inside the agent device edit form. Panel templates are form
+    fragments with no extra_css block of their own, so this leans entirely
+    on Wagtail's help-block idiom rather than introducing CSS.
+
+    The two actions are links, not forms: this fragment renders inside the
+    edit form and a nested form would be invalid. Each link leads to its own
+    confirmation page, which is where the POST happens.
+{% endcomment %}
+
+<div class="help-block
+    {% if status == 'revoked' %}help-critical
+    {% elif status == 'paired' %}help-info
+    {% else %}help-warning{% endif %}">
+
+    <p><strong>{{ status_label }}</strong></p>
+
+    {% if pairing_code %}
+        <p>
+            {% trans "Pairing code:" %}
+            <code>{{ pairing_code }}</code>
+        </p>
+        <p>
+            {% blocktrans with expires=pairing_code_expires_at %}Type this into the ADL Agent on the machine before {{ expires }}. It works once, and only once.{% endblocktrans %}
+        </p>
+    {% elif status == 'revoked' %}
+        <p>
+            {% blocktrans with revoked=device.revoked_at %}Revoked on {{ revoked }}. This machine's token no longer works and it has no pairing code. Issue a new code to let it back in.{% endblocktrans %}
+        </p>
+    {% elif status == 'unpaired' %}
+        <p>
+            {% trans "This device has no valid pairing code and has never paired. Issue a code to enroll the machine." %}
+        </p>
+    {% endif %}
+
+    {% if device.paired_at %}
+        <p>
+            {% blocktrans with paired=device.paired_at %}Paired on {{ paired }}.{% endblocktrans %}
+            {% if device.last_seen_at %}
+                {% blocktrans with last_seen=device.last_seen_at %}Last seen {{ last_seen }}.{% endblocktrans %}
+            {% else %}
+                {% trans "Not seen since." %}
+            {% endif %}
+        </p>
+    {% endif %}
+
+    <p>
+        <a href="{{ issue_code_url }}" class="button button-small button-secondary">
+            {% if device.paired_at %}{% trans "Issue new pairing code" %}{% else %}{% trans "Issue pairing code" %}{% endif %}
+        </a>
+        {% if status != 'revoked' %}
+            <a href="{{ revoke_url }}" class="button button-small no">
+                {% trans "Revoke device" %}
+            </a>
+        {% endif %}
+    </p>
+</div>

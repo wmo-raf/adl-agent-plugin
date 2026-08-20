@@ -1,0 +1,25 @@
+{% extends "wagtailadmin/generic/base.html" %}
+{% load i18n %}
+
+{% block titletag %}{{ header_title }}{% endblock %}
+
+{% block main_content %}
+    <div class="help-block {% if is_destructive %}help-critical{% else %}help-warning{% endif %}">
+        <p>{{ confirm_message }}</p>
+        {% if consequences %}
+            <ul>
+                {% for consequence in consequences %}
+                    <li>{{ consequence }}</li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+    </div>
+
+    <form method="POST" action="{{ action_url }}" novalidate>
+        {% csrf_token %}
+        <button type="submit" class="button {% if is_destructive %}no{% else %}bicolor button--icon{% endif %}">
+            {{ action_label }}
+        </button>
+        <a href="{{ cancel_url }}" class="button button-secondary">{% trans "Cancel" %}</a>
+    </form>
+{% endblock %}
