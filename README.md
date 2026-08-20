@@ -6,12 +6,16 @@ dialing in to fetch them. Many of the services ADL serves have no public IP and 
 ports; inverting the direction is what makes ingestion possible at all for them.
 
 This repository is the ADL-side half: the API those machines call, the admin an operator
-manages them from, the staging store their files land in, and (in a later slice) the drain
-that turns those files into observations. The Windows application lives in
-`wmo-raf/adl-agent`.
+manages them from, the staging store their files land in, and the drain that turns those
+files into observations. The Windows application lives in `wmo-raf/adl-agent`.
 
 See the spec in [wmo-raf/adl#269](https://github.com/wmo-raf/adl/issues/269) for the whole
 design and the decision tickets behind it.
+
+> **Requires the FTP plugin.** This plugin decodes with
+> [`adl-ftp-plugin`](https://github.com/wmo-raf/adl-ftp-plugin) (0.12.0 or later) and does
+> not ship decoders of its own — install it on the same ADL instance, along with whichever
+> country-specific decoder plugins the vendor files need.
 
 ## What is built so far
 
@@ -28,8 +32,9 @@ the app; what the data means stays in the ADL admin.
 call that takes one of them, and an `AgentStationDataFile` ledger that remembers what
 arrived so the same bytes are never asked for twice.
 
-The drain into ADL's ingestion pipeline arrives in a later slice; until then files are
-staged and nothing is decoded.
+**The drain.** Staged files decoded through the FTP plugin's decoder ecosystem and upserted
+by ADL's ordinary ingestion pipeline, run on the connection's schedule and again, within
+seconds, whenever an upload cycle finishes.
 
 ### Credentials
 
@@ -164,6 +169,80 @@ the device does not own — deleted centrally, or never its own — is reported 
 does not cost the machine the rest of its cycle. Pausing a *connection's* processing does
 not stop its files arriving; it stops them being processed, which is the point of pausing.
 
+### From file to observation
+
+A staged file is not yet data. Turning it into observations is an ordinary ADL ingestion
+run — the same `get_station_data` lifecycle every other plugin uses, with the same date
+window, per-station lock, unit conversion, QC pipeline, upsert and activity log. The only
+unusual thing about this plugin is where the bytes came from.
+
+**Decoding is the FTP plugin's, unchanged.** The agent ships raw files precisely so that it
+can be: the decoder ecosystem written for `adl-ftp-plugin` — standard CSV, TOA5, and every
+country-specific decoder written against its registry — reads local file paths, and a
+staged file is a local file path. So a connection picks its **Decoder** and, where that
+decoder needs one, a **CSV Configuration**, from exactly the lists an FTP connection picks
+them from. A decoder fix therefore deploys on ADL and never on a machine in the field.
+
+**What each run does**, per station link: take every file the ledger has as `received`,
+oldest first; decode it; yield its records to core; wait for core to persist them; then
+write down what became of the file.
+
+| Outcome | Status | What is recorded |
+|---|---|---|
+| Decoded, records saved | `processed` | `processed_at`, `values_saved` |
+| Decoded, nothing ADL maps | `processed` | `values_saved` = 0 — a mapping or window problem, not a file problem |
+| Would not decode | `failed` | `last_error`, the decoder's own message |
+| Bytes unreadable — storage down, object gone | `received` | nothing — the fault is the instance's, not the file's |
+| No decoder chosen on the connection | `received` | nothing — the fault is the connection's, and choosing a decoder drains the backlog |
+
+"Processed" means *persisted*, not merely decoded: the stamp is written after core has
+flushed that file's records, so `values_saved` is what reached the database — which may be
+fewer values than the file held, and that difference is usually the interesting part.
+
+A `failed` file is **not retried**. The same bytes fail the same way, and a station
+re-reporting the same error every quarter of an hour teaches an operator to stop reading.
+It waits for a decoder fix and a deliberate re-process, or for the vendor to write the file
+again — a changed file comes again in full and resets its row to `received`.
+
+That is exactly why `failed` is reserved for the *file* being wrong. Anything that will be
+right again on its own — storage unreachable, the instance out of disk — leaves the row
+`received` and is logged instead. Marking it would let one bad minute from the object store
+permanently sideline a country's data, with nothing in this slice able to bring it back.
+
+`last_error` is redacted on the way in. It is a decoder's exception text, and it is
+rendered in the listing, on the inspect page and in worker logs, so a vendor path or
+storage URL carrying a credential is bounded at the write point rather than at each reader.
+
+One bad file costs nothing but itself: the drain marks it and moves on to the rest of the
+station's backlog.
+
+**Latency: the nudge.** Celery Beat runs each connection on its interval, and that pass is
+the safety net. But an interval is the wrong latency for push delivery — a machine that has
+just uploaded has *told* ADL there is work. So an upload asks for its connection to be
+drained a few seconds later, and two things keep that from becoming a stampede:
+
+- *One nudge per burst.* The first upload of a cycle takes a short-lived latch and
+  schedules the drain; every upload behind it lets that drain cover its file too. The latch
+  expires as the drain runs, so a machine still uploading re-arms one.
+- *One drain per station.* The nudge runs the ordinary ingestion path, so it takes the same
+  per-station lock the scheduled pass takes. A nudge and a scheduled run landing together
+  never both process a file — the second records a skip.
+
+Two layers stop a file being processed twice, and they cover different failures. The
+per-station lock stops two runs starting together. The ledger status stops a file already
+`processed` being picked up at all — so even if the lock were lost or expired, the second
+run finds nothing to do. Core's upsert by observation time makes any overlap that does
+happen harmless.
+
+**Pausing a connection** stops its files being processed, not its files arriving. Uploads
+are still accepted and staged; the drain — scheduled or nudged — leaves them alone until
+processing is switched back on. That distinction is the point of pausing one.
+
+**Where failures are seen.** *Agent Station Data Files* under Snippets lists every file a
+machine has sent, with its status and the first line of its error as columns and a status
+filter, so an operator can ask a country for its failures alone. The whole error is on the
+file's own page.
+
 ### Configuration, and who owns which half
 
 ADL stores every durable setting; the app is an editor writing through the API, holding
@@ -216,9 +295,13 @@ immediately; the device's page shows the code, its expiry, and the two actions:
 Both actions need change permission on the device, not merely admin access.
 
 **Agent Connections** and **Agent Station Links** appear alongside every other plugin's
-under Connections. A connection names the machine that sends its files and carries the
-variable mappings for the vendor's file columns; a station link binds one ADL station to
-one folder on that machine, and may override a mapping the connection got wrong for it.
+under Connections. A connection names the machine that sends its files, the decoder that
+reads them (and its CSV configuration, where the decoder needs one), and the variable
+mappings for the vendor's file columns; a station link binds one ADL station to one folder
+on that machine, and may override a mapping the connection got wrong for it.
+
+**Agent Station Data Files** under Snippets is the file-by-file record: what arrived, what
+became of it, and why anything failed.
 
 Deleting a device that has connections is refused — the delete page offers no button. Take
 a machine out of service by revoking it, which cuts it off and leaves a country's folder
@@ -272,7 +355,11 @@ curl -X POST http://localhost:8080/plugins/api/agent/v1/files/ \
 # 8. Offer it again — ADL already has it
 #    (repeat step 6) -> 200 {"requested": [], ...}
 
-# 9. Revoke the device in the admin, then repeat step 2
+# 9. Within seconds, the file has been decoded. Check in the admin under
+#    Snippets -> Agent Station Data Files (status "Processed", with a count of
+#    values saved), and the observations themselves in the monitoring views.
+
+# 10. Revoke the device in the admin, then repeat step 2
 # -> 401 {"detail": "Invalid or revoked device token."}
 ```
 
@@ -295,8 +382,11 @@ the pairing lifecycle over HTTP (exchange, replay, expiry, revocation, rotation,
 limit, the authorization boundary), the sync and config endpoints (scope, both tiers, tier
 enforcement, validation, last-write-wins, version propagation, liveness), the manifest and
 upload endpoints (the full diffing matrix, paging, hash and size verification, gzip, the
-size cap, re-upload in place, and what the watermark does as the ledger fills), the admin
-pages, and the credential and variable-mapping rules on their own.
+size cap, re-upload in place, and what the watermark does as the ledger fills), the drain
+(a real vendor CSV becoming observation records, failure isolation, what a run reports it
+had to work with, idempotency under a held lock, and a grown file re-decoding), the nudge
+that makes an upload become observations without waiting for the clock, the admin pages,
+and the credential and variable-mapping rules on their own.
 
 ## Getting started
 

@@ -4,22 +4,28 @@ import gzip
 import hashlib
 import itertools
 import tempfile
+from contextlib import contextmanager
+from datetime import timedelta
 
 from django.contrib.gis.geos import Point
 from django.core.cache import cache
+from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone as dj_timezone
 
 from adl.core.models import DataParameter, Network, Station, Unit
+from adl_agent_plugin.entries import FileEntry
 from adl_agent_plugin.models import (
     AgentConnection,
     AgentConnectionVariableMapping,
     AgentDevice,
+    AgentStationDataFile,
     AgentStationLink,
     AgentStationLinkVariableMapping,
 )
+from adl_agent_plugin.tasks import nudge_latch_key
 from adl_agent_plugin.throttling import AgentPairThrottle
 
 PAIR_URL = reverse("plugins:adl_agent:pair")
@@ -46,6 +52,35 @@ def clear_pair_throttle(ident="127.0.0.1"):
         "scope": AgentPairThrottle.scope, "ident": ident,
     }
     cache.delete(key)
+
+
+def clear_nudge_latch(connection):
+    """Forget that this connection has already been nudged.
+
+    Same reason as the throttle above: ADL's cache is Redis, shared and
+    long-lived, so a latch taken by one test would silence the next.
+    """
+    cache.delete(nudge_latch_key(getattr(connection, "pk", connection)))
+
+
+@contextmanager
+def tasks_run_immediately():
+    """Run enqueued Celery tasks in-process, the way a worker would.
+
+    The nudge that follows an upload is a real task, so a test asserting that
+    a file arriving becomes observations has to let it run. Celery reads its
+    configuration from Django settings once, at import, so this flips the
+    app's own switch rather than overriding a setting nothing would re-read.
+    """
+    from adl.config.celery import app
+
+    previous = (app.conf.task_always_eager, app.conf.task_eager_propagates)
+    app.conf.task_always_eager = True
+    app.conf.task_eager_propagates = True
+    try:
+        yield
+    finally:
+        app.conf.task_always_eager, app.conf.task_eager_propagates = previous
 
 
 def configured_pair_attempts():
@@ -114,6 +149,31 @@ def create_connection(device=None, network=None, **kwargs):
         network=network or create_network(),
         **kwargs,
     )
+
+
+def standard_csv_config(**kwargs):
+    """A CSV configuration for the FTP plugin's ``standard_csv`` decoder.
+
+    The agent stages files and the FTP plugin's decoders read them, so the
+    configuration a decode runs under is the FTP plugin's model -- imported
+    here rather than reimplemented, which is the whole point of the shared
+    decoder ecosystem.
+    """
+    from adl_ftp_plugin.models import StandardCSVConfig
+
+    kwargs.setdefault("name", f"CSV Config {next(_counter)}")
+    kwargs.setdefault("datetime_column", "timestamp")
+    kwargs.setdefault("datetime_format", "%Y-%m-%d %H:%M:%S")
+    return StandardCSVConfig.objects.create(**kwargs)
+
+
+def decoding_connection(device=None, network=None, **kwargs):
+    """A connection wired up to actually decode what arrives on it."""
+    kwargs.setdefault("decoder", "standard_csv")
+    kwargs.setdefault("stations_timezone", "UTC")
+    if "csv_config" not in kwargs:
+        kwargs["csv_config"] = standard_csv_config()
+    return create_connection(device=device, network=network, **kwargs)
 
 
 def create_station_link(connection=None, station=None, **kwargs):
@@ -189,6 +249,25 @@ def manifest_entry(station_link, name, content, mtime=None, **overrides):
     return entry
 
 
+def stage_file(station_link, name, content, mtime=None):
+    """A file that has already arrived, staged exactly as an upload stages it.
+
+    Goes through :meth:`AgentStationDataFile.record_upload` rather than
+    building a row by hand, so a drain test is draining what the upload
+    endpoint really leaves behind.
+    """
+    entry = FileEntry(
+        station_link_id=station_link.pk,
+        name=name,
+        size=len(content),
+        mtime=mtime or dj_timezone.now(),
+        content_hash=sha256_of(content),
+    )
+    return AgentStationDataFile.record_upload(
+        station_link, entry, ContentFile(content),
+    )
+
+
 class AgentClient:
     """A paired device, driving the file endpoints the way the app does."""
 
@@ -221,6 +300,49 @@ class AgentClient:
         )
 
         return self.client.post(FILES_URL, data=payload, **bearer(self.token))
+
+
+# ---------------------------------------------------------------------------
+# Vendor files, and the window their observations fall in
+# ---------------------------------------------------------------------------
+
+def observation_time(minutes_ago):
+    """A whole minute in the recent past, in UTC.
+
+    Whole minutes because the CSV format these tests use carries seconds but
+    not microseconds, and a record that survives the round trip should compare
+    equal to what the test wrote.
+    """
+    return (dj_timezone.now() - timedelta(minutes=minutes_ago)).replace(
+        second=0, microsecond=0
+    )
+
+
+def csv_file(*readings, column="AirTemp"):
+    """A vendor CSV: one datetime column, one variable column.
+
+    ``readings`` are ``(datetime, value)`` pairs.
+    """
+    lines = [f"timestamp,{column}"]
+    lines += [
+        f"{moment.strftime('%Y-%m-%d %H:%M:%S')},{value}"
+        for moment, value in readings
+    ]
+    return ("\n".join(lines) + "\n").encode()
+
+
+#: Rendering a Wagtail admin page asks the staticfiles storage for hashed asset
+#: names, and the test runner never runs collectstatic -- so the manifest these
+#: pages resolve against does not exist. Serving static files unhashed is a
+#: property of the test process, not of the plugin.
+UNHASHED_STATICFILES = override_settings(STORAGES={
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+    },
+})
 
 
 class TemporaryMediaRoot:

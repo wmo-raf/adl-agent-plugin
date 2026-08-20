@@ -1,0 +1,12 @@
+# Deliberately empty.
+#
+# This plugin needs adl-ftp-plugin -- it decodes with that plugin's decoder
+# registry and its shared pipeline seams -- but that is an *installation*
+# dependency, not a pip one. ADL builds INSTALLED_APPS by scanning the folders
+# under ADL_PLUGIN_DIRS, so pip-installing the package would put the module on
+# the path without ever registering the app, its models or its migrations.
+#
+# Declare it in the instance's plugins.toml instead, ahead of this plugin, at
+# 0.12.0 or later (the release carrying the file-matching and decoder-config
+# seams). Without it this plugin fails loudly at Django import, which is the
+# right way for a missing hard dependency to behave.
