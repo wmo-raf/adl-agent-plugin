@@ -14,6 +14,7 @@ from .authentication import AgentDeviceAuthentication, IsAgentDevice
 from .credentials import PairingError
 from .entries import parse_entry
 from .errors import AgentRequestRejected
+from .heartbeat import read_heartbeat
 from .manifest import diff_against_ledger, read_manifest
 from .models import (
     AgentDevice,
@@ -24,6 +25,7 @@ from .models import (
 from .serialization import (
     config_write_payload,
     device_summary,
+    heartbeat_payload,
     manifest_payload,
     sync_payload,
     upload_payload,
@@ -131,6 +133,42 @@ class AgentDeviceMeView(AgentAPIView):
 
     def get(self, request):
         return Response(device_summary(self.device), status=status.HTTP_200_OK)
+
+
+class AgentHeartbeatView(AgentAPIView):
+    """``POST api/agent/v1/heartbeat`` -- the machine says it is still there.
+
+    Sent on its own fixed cadence from a loop isolated from the scan cycle,
+    which is the whole point: a machine whose scan loop has wedged keeps
+    heartbeating, so ADL can tell "the server is down" from "the server is up
+    and its work has stopped" -- the distinction HQ has never been able to
+    make with reverse tunnels (decision #264).
+
+    Everything in the body is optional. A heartbeat ADL rejects is a
+    heartbeat that never arrived, and a machine whose disk query failed
+    should still be able to say it is alive.
+
+    The response carries the cadence and the configuration version, so the
+    two things a machine most needs to keep in step ride the call it makes
+    most often: a fleet follows a cadence change without being reinstalled,
+    and a machine whose configuration moved learns it within five minutes
+    rather than at its next scan.
+    """
+
+    parser_classes = [JSONParser]
+
+    def post(self, request):
+        try:
+            beat = read_heartbeat(request.data)
+        except AgentRequestRejected as exc:
+            return rejection(exc)
+
+        liveness = self.device.record_heartbeat(beat)
+
+        return Response(
+            heartbeat_payload(self.device, liveness),
+            status=status.HTTP_200_OK,
+        )
 
 
 class AgentSyncView(AgentAPIView):

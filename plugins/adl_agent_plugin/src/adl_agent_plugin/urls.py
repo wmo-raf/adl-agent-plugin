@@ -3,6 +3,7 @@ from django.urls import path
 from .api_views import (
     AgentDeviceMeView,
     AgentFileUploadView,
+    AgentHeartbeatView,
     AgentManifestView,
     AgentPairView,
     AgentStationLinkConfigView,
@@ -15,6 +16,7 @@ urlpatterns = [
     path("pair/", AgentPairView.as_view(), name="pair"),
     path("me/", AgentDeviceMeView.as_view(), name="device_me"),
     path("sync/", AgentSyncView.as_view(), name="sync"),
+    path("heartbeat/", AgentHeartbeatView.as_view(), name="heartbeat"),
     path("manifest/", AgentManifestView.as_view(), name="manifest"),
     path("files/", AgentFileUploadView.as_view(), name="files"),
     path(

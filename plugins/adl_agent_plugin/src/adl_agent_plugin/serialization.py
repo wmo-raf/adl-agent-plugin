@@ -12,6 +12,9 @@ The wire form of a station link's own tier is built by the model
 beside the field's definition. This module assembles the rest.
 """
 
+from django.utils import timezone as dj_timezone
+
+from .health import heartbeat_interval_minutes
 from .limits import MANIFEST_PAGE_LIMIT, MAX_UPLOAD_BYTES
 from .models import AgentConnection, AgentStationDataFile, AgentStationLink
 
@@ -32,10 +35,18 @@ def device_payload(device):
     Carries the check interval because the cadence is per machine, not per
     connection (decision #260): one loop scans every folder this device has
     been given.
+
+    And the heartbeat interval beside it, which is a different cadence for a
+    different loop -- deliberately not derived from the check interval, since
+    the two are separate precisely so that a wedged scan cycle still
+    heartbeats (decision #264). It is the server's number, handed out rather
+    than compiled into the agent, so a deployment can change how closely it
+    watches its fleet without touching a machine in the field.
     """
     return {
         **device_summary(device),
         "check_interval_minutes": device.check_interval_minutes,
+        "heartbeat_interval_minutes": heartbeat_interval_minutes(),
     }
 
 
@@ -121,6 +132,29 @@ def sync_payload(device):
             )
             for connection in connections
         ],
+    }
+
+
+def heartbeat_payload(device, liveness):
+    """The answer to a heartbeat: the clock, the cadence, and the verdict.
+
+    ``clock_skew_seconds`` is sent back rather than merely stored: the
+    machine is the only party that can do anything about its own clock, and
+    telling it the number ADL computed is what lets the agent surface
+    "this machine's clock is wrong" in its own tray without a second call.
+
+    ``server_time`` is the raw material behind that number, so an agent can
+    check ADL's arithmetic -- and correct a skew ADL has only just started
+    measuring -- without waiting for the next heartbeat.
+    """
+    return {
+        "device_id": device.pk,
+        "server_time": dj_timezone.now(),
+        "clock_skew_seconds": device.clock_skew_seconds,
+        "status": liveness.state,
+        "heartbeat_interval_minutes": heartbeat_interval_minutes(),
+        "check_interval_minutes": device.check_interval_minutes,
+        "config_version": device.current_config_version(),
     }
 
 

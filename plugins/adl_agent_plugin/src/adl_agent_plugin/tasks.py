@@ -1,7 +1,10 @@
 """
 When the agent plugin's own work happens.
 
-Two things run on a clock here, and they pull in opposite directions. The
+Three things run on a clock here. The **fleet sweep** is the one that exists
+purely because of what does *not* happen: an offline machine sends no
+request, so noticing its silence has to be ADL's own initiative. The other
+two pull in opposite directions -- the
 **nudge** makes a drain happen sooner than the schedule would, because a
 machine that has just uploaded has told ADL there is work. The nightly
 **retention sweep** lets staged bytes go once nobody needs them any more; what
@@ -44,6 +47,11 @@ from celery_singleton import Singleton
 from django.core.cache import cache
 from django.db import transaction
 
+from .fleet import (
+    prune_state_transitions,
+    publish_source_evidence,
+    sweep_liveness,
+)
 from .retention import prune_expired_files
 
 logger = logging.getLogger(__name__)
@@ -53,6 +61,12 @@ logger = logging.getLogger(__name__)
 #: several files is drained once; short enough that "within seconds of
 #: arrival" is true.
 NUDGE_DELAY_SECONDS = 5
+
+#: How often ADL re-reads what its fleet's last reports say. A minute: the
+#: thresholds it enforces are whole heartbeats apart, so this is fine enough
+#: that "offline after three missed" means what it says, and coarse enough
+#: that a settled fleet costs one query a minute.
+FLEET_SWEEP_SECONDS = 60
 
 
 def nudge_latch_key(connection_id):
@@ -120,6 +134,43 @@ def drain_agent_connection(connection_id):
 
 
 @app.task(base=Singleton, bind=True)
+def sweep_agent_fleet_liveness(self):
+    """Notice which machines have gone quiet, and which have come back.
+
+    Every minute, because the thresholds it enforces are counted in whole
+    heartbeats and a sweep coarser than that would blur the boundary an
+    operator is told about ("offline after three missed"). It costs one query
+    over the device table plus a write for each machine that actually moved,
+    which for a settled fleet is no writes at all.
+
+    A singleton, like every other sweep in ADL: two of them running together
+    would each see the other's pre-state and both append the same transition.
+
+    Two steps, in this order. First work out where every machine stands and
+    log the ones that moved; then publish those verdicts where the ingestion
+    diagnostic reads them, so the connection health page shows what the fleet
+    is doing without anyone pressing anything.
+    """
+    changed = sweep_liveness()
+
+    if changed:
+        logger.info("[AGENT FLEET] %s device(s) changed state", changed)
+
+    published = publish_source_evidence()
+
+    if published:
+        logger.info("[AGENT FLEET] Published %s source verdict(s)", published)
+
+
+@app.task(base=Singleton, bind=True)
+def run_agent_fleet_retention(self):
+    """Drop state changes older than the retention period."""
+    logger.info("[AGENT FLEET] Pruning expired agent device state transitions")
+    pruned = prune_state_transitions()
+    logger.info("[AGENT FLEET] Pruned %s old state transition(s)", pruned)
+
+
+@app.task(base=Singleton, bind=True)
 def run_agent_file_retention(self):
     """Drop every connection's expired staged bytes (story 22).
 
@@ -141,4 +192,19 @@ def setup_periodic_tasks(sender, **kwargs):
         crontab(hour=1, minute=0),
         run_agent_file_retention.s(),
         name="run-agent-file-retention-daily",
+    )
+
+    # Ten past the same hour, behind the file sweep: the two are unrelated
+    # and neither is urgent, and running them one after another keeps the
+    # nightly work of this plugin in one window.
+    sender.add_periodic_task(
+        crontab(hour=1, minute=10),
+        run_agent_fleet_retention.s(),
+        name="run-agent-fleet-retention-daily",
+    )
+
+    sender.add_periodic_task(
+        FLEET_SWEEP_SECONDS,
+        sweep_agent_fleet_liveness.s(),
+        name="sweep-agent-fleet-liveness",
     )

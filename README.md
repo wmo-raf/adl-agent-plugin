@@ -41,6 +41,11 @@ schedule while the ledger row that remembers the file lives on, and a re-process
 that turns received files into observations again — re-reading the bytes where ADL still
 has them, and asking the machine for them where it does not.
 
+**Fleet health.** Every machine heartbeats on its own cadence, so *offline*, *cycle stuck*
+and *clock skewed* are distinct visible states rather than one shrug at "no data". The
+verdict feeds ADL's existing connection-health checklist as the source layer, and the
+device listing is the fleet view.
+
 ### Credentials
 
 |                | Pairing code                      | Device token                         |
@@ -75,7 +80,8 @@ rate-limited (30 attempts per client IP per hour by default; set
 A device token is a credential on these endpoints and nowhere else — it is not accepted by
 ADL's core API or the Wagtail admin. A `401` from any agent endpoint means the device was
 revoked, and the agent should stop uploading and ask to be re-paired. Every authenticated
-call also records that the device was seen, which is the passive half of fleet liveness.
+call also records that the device was seen and — from the `X-Agent-Version` header it
+carries — what it is running, which is the passive half of fleet liveness.
 
 Errors answer with one envelope: a `code` an agent switches on, a `detail` a technician
 reads, and whatever else that refusal owes the caller — `fields` for a config write that
@@ -312,6 +318,125 @@ prune_expired_files; prune_expired_files()"` after shortening the connection's r
 press **Re-process** on the row, and the machine's next manifest is asked for a file it
 delivered months ago — which arrives, is decoded, and becomes observations again.
 
+### Fleet health: offline, stuck, or skewed
+
+When a country goes quiet, "no data arrived" is the least useful thing ADL can say. Three
+very different faults produce it, and the fix for each is different: the machine is down,
+the machine is up and its scan loop has wedged, or everything is running and the machine's
+clock is wrong so its file windows are looking in the wrong place. Reverse tunnels could
+never tell these apart, and that is most of what made them expensive to run.
+
+So every machine **heartbeats on its own cadence** — five minutes by default, from a loop
+deliberately isolated from the scan cycle, which is the whole trick: a machine whose
+scanning has wedged keeps heartbeating, and that difference is the diagnosis.
+
+```bash
+curl -X POST http://localhost:8080/plugins/api/agent/v1/heartbeat/ \
+     -H "Authorization: Bearer $TOKEN" -H "X-Agent-Version: 1.4.0" \
+     -H 'Content-Type: application/json' \
+     -d '{"app_version": "1.4.0",
+          "os_version": "Windows Server 2019 (10.0.17763)",
+          "uptime_seconds": 93600,
+          "device_time": "2026-02-20T13:00:04+03:00",
+          "backlog_count": 7,
+          "last_cycle": {"completed_at": "2026-02-20T09:58:00Z",
+                         "links": [{"station_link_id": 1, "scanned": 40,
+                                    "offered": 2, "uploaded": 2, "failed": 0}]},
+          "disk": [{"volume": "C:", "free_bytes": 51539607552,
+                    "total_bytes": 274877906944}]}'
+# -> 200 {"status": "online", "clock_skew_seconds": 4, "server_time": "...",
+#         "heartbeat_interval_minutes": 5, "check_interval_minutes": 5,
+#         "config_version": 6}
+```
+
+Everything in the body is optional. A heartbeat ADL refuses is a heartbeat that never
+arrived, and a machine whose disk query failed should still be able to say it is alive —
+which is the one fact the whole ladder rests on. But a field that is *present* and
+unreadable is refused, so an agent shipping the wrong shape learns at once instead of
+looking healthy while every number ADL shows is quietly missing.
+
+**Skew is computed, never reported.** The machine sends the time it thinks it is; ADL
+subtracts its own clock. The number goes back in the response, because the machine is the
+only party that can do anything about its own clock.
+
+**The cadence and the config version ride the response**, so the two things a machine most
+needs to keep in step travel on the call it makes most often: a fleet follows a cadence
+change without being reinstalled, and a machine whose configuration moved learns within
+five minutes rather than at its next scan. The cadence is in every `sync` response too, and
+is set with `ADL_AGENT_HEARTBEAT_INTERVAL_MINUTES`.
+
+#### The states
+
+| State | When | What it means |
+|---|---|---|
+| **Online** | Heartbeats fresh, cycles completing | Nothing to do |
+| **Degraded** | 2 missed heartbeats (~10 min) | The machine or its link is faltering |
+| **Offline** | 3 missed heartbeats (~15 min) | Someone has to go and look at the machine |
+| **Cycle stuck** | Heartbeats fresh, no completed cycle for over 2× the check interval | The service is alive; its work is not |
+
+Silence outranks stuckness, always: a machine that has stopped talking cannot be *observed*
+to be cycling, so it is reported offline rather than stuck. A machine that has never been
+paired has no liveness at all — there may be no machine.
+
+**Clock skew is not a state.** Above five minutes it is shown beside whatever the state is
+and never becomes it, because a skewed machine is usually otherwise fine, and folding it in
+would leave an operator unable to tell whether data is still arriving. Every threshold here
+is settable: `ADL_AGENT_DEGRADED_AFTER_MISSED`, `ADL_AGENT_OFFLINE_AFTER_MISSED`,
+`ADL_AGENT_CYCLE_STUCK_MULTIPLIER`, `ADL_AGENT_CLOCK_SKEW_ADVISORY_SECONDS`.
+
+#### Where it surfaces
+
+**In the connection health checklist**, as the source layer. Layer 5 asks every plugin the
+same question — *is the source accepting us and offering data?* — and for an agent
+connection the source is the machine in the country. So this plugin answers it from what
+that machine last said about itself, which makes it the one source check in ADL that
+performs no I/O at all: it reads columns the heartbeat endpoint wrote.
+
+Core probes external layers on demand only, and rightly — dialling partner hosts on a timer
+across twenty-six deployments risks getting ADL's addresses banned. That reasoning is about
+network calls, and this check makes none, so the minute sweep publishes the standing verdict
+where core reads it and **nobody has to press anything**: an operator opening a connection's
+diagnostic page sees "Songea server has missed 3 heartbeats" as the headline. A verdict is
+written only when the machine's state has moved, or when the standing one is about to age
+out of core's fifteen-minute freshness window — a published verdict, not the heartbeat
+history there is deliberately none of.
+
+Layer 4, the network path, reports **not applicable**. There is no host for ADL to resolve
+and no port for it to connect to: the traffic runs the other way. The connection says so
+with `dials_source = False`, and that declaration does more than tidy one row — it stops
+core reading this connection's *completed ingestion runs* as evidence about the source. On
+a plugin that dials, a completed run is the strongest layer-4 and layer-5 evidence there
+is: real DNS, real authentication, real bytes. Here a run is a sweep of a staging store. It
+dialled nothing, and without that declaration a drain of files that arrived before the
+machine died would report the connection green — outranking, because it is fresher, the
+machine's own report of being dead. (`dials_source` is an ADL core declaration, and this
+plugin is its first user: on a core that predates it the flag is simply an unread class
+attribute — the plugin still runs, but layer 4 falls back to reporting itself unsupported
+and completed drains are read as source evidence again.)
+
+**In the device listing** — *Agent Devices* in the main menu — which doubles as the fleet
+view: name, agent version, state, last heartbeat, clock skew, and the version pin. A
+device's own page carries the reading behind its state: uptime, backlog, free disk, the
+per-station scan counts from its last cycle, and its recent state changes.
+
+**As transitions, and only transitions.** There is no heartbeat history table. A hundred
+machines reporting every five minutes would write ten million rows a year to answer a
+question nobody asks, while the questions that *are* asked — what is this machine doing
+now, and when did it change — are answered by the latest snapshot on the device and by an
+append-only log of state changes. A country offline all weekend has one row saying so, and
+flapping shows up as what it is: a run of rows hours apart. Rows are dropped after ninety
+days, the same horizon core keeps its own connection-health transitions for.
+
+Noticing silence is ADL's own initiative, necessarily: an offline machine sends no request,
+so a sweep runs every minute, re-reads what the fleet's last reports say, and publishes the
+verdicts. It writes nothing when nothing has changed, which for a settled fleet is nearly
+every minute.
+
+Per-cycle ingestion detail is not duplicated here — it lands in the ordinary
+`StationLinkActivityLog` through the drain, so trends come free. And alerting is not
+agent-specific: the agent surfaces states through core health and inherits whatever
+alerting core has or grows.
+
 ### Configuration, and who owns which half
 
 ADL stores every durable setting; the app is an editor writing through the API, holding
@@ -352,8 +477,10 @@ off centrally instead of watching it disappear.
 
 ### Admin
 
-**Agent Devices** in the main menu. Creating a device issues its first pairing code
-immediately; the device's page shows the code, its expiry, and the two actions:
+**Agent Devices** in the main menu — the fleet view as well as the enrollment form; see
+[Fleet health](#fleet-health-offline-stuck-or-skewed). Creating a device issues its first
+pairing code immediately; the device's page shows the code, its expiry, and the two
+actions:
 
 - **Issue new pairing code** — enrollment, and also rotation. The device's current token
   keeps working until the new code is redeemed, so rotating does not create a data gap; the
@@ -454,7 +581,11 @@ enforcement, validation, last-write-wins, version propagation, liveness), the ma
 upload endpoints (the full diffing matrix, paging, hash and size verification, gzip, the
 size cap, re-upload in place, and what the watermark does as the ledger fills), the drain
 (a real vendor CSV becoming observation records, failure isolation, what a run reports it
-had to work with, idempotency under a held lock, and a grown file re-decoding), the nudge
+had to work with, idempotency under a held lock, and a grown file re-decoding), the
+heartbeat and every liveness state it produces — driven only by posting heartbeats and
+withholding them, never by writing a state — along with the transitions they log, the
+source-layer verdict core's own evaluator reaches over them, and the fleet listing, the
+nudge
 that makes an upload become observations without waiting for the clock, retention (what the
 sweep drops, what it must never touch, and that a pruned file is neither offered nor drained
 again), both re-process routes end to end (a mapping fixed after the fact reaching a file

@@ -1,0 +1,130 @@
+{% load i18n %}
+
+{% comment %}
+    Rendered inside the agent device edit form, beneath the identity panel.
+    Like that one, this is a form fragment with no CSS of its own: it leans
+    on Wagtail's help-block idiom and on a plain table.
+
+    Which state the machine is in, and the sentence explaining it, are asked
+    of the device -- the ladder lives once, in adl_agent_plugin.health, and
+    is never re-derived here from raw timestamps.
+{% endcomment %}
+
+<div class="help-block {{ liveness.tone }}">
+    <p>
+        <strong>{{ liveness.label }}</strong> — {{ liveness.message }}
+    </p>
+    {% if device.liveness_since %}
+        <p>
+            {% blocktrans with since=device.liveness_since %}In this state since {{ since }}.{% endblocktrans %}
+        </p>
+    {% endif %}
+    {% if liveness.skew_note %}
+        <p>{{ liveness.skew_note }}</p>
+    {% endif %}
+</div>
+
+<table class="listing">
+    <tbody>
+        <tr>
+            <th scope="row">{% trans "Last heartbeat" %}</th>
+            <td>{% if device.last_heartbeat_at %}{{ device.last_heartbeat_at }}{% else %}{% trans "Never" %}{% endif %}</td>
+        </tr>
+        <tr>
+            <th scope="row">{% trans "Last completed scan cycle" %}</th>
+            <td>{% if device.last_cycle_completed_at %}{{ device.last_cycle_completed_at }}{% else %}{% trans "Never" %}{% endif %}</td>
+        </tr>
+        <tr>
+            <th scope="row">{% trans "Agent version" %}</th>
+            <td>{{ device.agent_version|default:"—" }}</td>
+        </tr>
+        <tr>
+            <th scope="row">{% trans "Operating system" %}</th>
+            <td>{{ device.os_version|default:"—" }}</td>
+        </tr>
+        <tr>
+            <th scope="row">{% trans "Clock skew" %}</th>
+            <td>{{ device.clock_skew_display }}</td>
+        </tr>
+        <tr>
+            <th scope="row">{% trans "Service uptime" %}</th>
+            <td>{% if uptime_seconds %}{{ uptime_seconds }}s{% else %}—{% endif %}</td>
+        </tr>
+        <tr>
+            <th scope="row">{% trans "Files waiting to be sent" %}</th>
+            <td>{{ backlog_count|default_if_none:"—" }}</td>
+        </tr>
+    </tbody>
+</table>
+
+{% if volumes %}
+    <h3>{% trans "Disk" %}</h3>
+    <table class="listing">
+        <thead>
+            <tr>
+                <th>{% trans "Volume" %}</th>
+                <th>{% trans "Free bytes" %}</th>
+                <th>{% trans "Total bytes" %}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for volume in volumes %}
+                <tr>
+                    <td>{{ volume.volume|default:"—" }}</td>
+                    <td>{{ volume.free_bytes|default_if_none:"—" }}</td>
+                    <td>{{ volume.total_bytes|default_if_none:"—" }}</td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+{% endif %}
+
+{% if links %}
+    <h3>{% trans "Last cycle, per station" %}</h3>
+    <table class="listing">
+        <thead>
+            <tr>
+                <th>{% trans "Station link" %}</th>
+                <th>{% trans "Scanned" %}</th>
+                <th>{% trans "Offered" %}</th>
+                <th>{% trans "Uploaded" %}</th>
+                <th>{% trans "Failed" %}</th>
+                <th>{% trans "Error" %}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for link in links %}
+                <tr>
+                    <td>{{ link.station_link_id }}</td>
+                    <td>{{ link.scanned|default_if_none:"—" }}</td>
+                    <td>{{ link.offered|default_if_none:"—" }}</td>
+                    <td>{{ link.uploaded|default_if_none:"—" }}</td>
+                    <td>{{ link.failed|default_if_none:"—" }}</td>
+                    <td>{{ link.error|default_if_none:"" }}</td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+{% endif %}
+
+{% if transitions %}
+    <h3>{% trans "Recent state changes" %}</h3>
+    <table class="listing">
+        <thead>
+            <tr>
+                <th>{% trans "When" %}</th>
+                <th>{% trans "From" %}</th>
+                <th>{% trans "To" %}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for transition in transitions %}
+                <tr>
+                    <td>{{ transition.at }}</td>
+                    <td>{{ transition.get_from_state_display|default:"—" }}</td>
+                    <td>{{ transition.get_to_state_display }}</td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+{% endif %}
