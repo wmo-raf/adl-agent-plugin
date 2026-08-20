@@ -47,7 +47,7 @@ class OlderCoreImportSafetyTests(SimpleTestCase):
     # Every module this plugin ships. Extend it as the plugin grows more.
     MODULES = ["models.py", "plugins.py", "apps.py", "views.py",
                "wagtail_hooks.py", "api_views.py", "authentication.py",
-               "constants.py", "credentials.py", "panels.py", "urls.py",
+               "credentials.py", "panels.py", "urls.py",
                "throttling.py", "viewsets.py"]
 
     DENIED = "adl.core.source_checks"

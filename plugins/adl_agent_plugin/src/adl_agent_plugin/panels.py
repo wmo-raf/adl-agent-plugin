@@ -27,8 +27,8 @@ class AgentDeviceIdentityPanel(Panel):
 
             context.update({
                 "device": device,
-                "status": device.status,
                 "status_label": device.status_label,
+                "status_tone": device.status_tone,
                 "pairing_code": (
                     device.pairing_code if device.pairing_code_is_valid else None
                 ),

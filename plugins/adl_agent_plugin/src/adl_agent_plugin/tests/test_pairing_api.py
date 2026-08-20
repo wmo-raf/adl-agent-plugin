@@ -234,6 +234,24 @@ class RevocationTests(AgentPairingTestCase):
         self.assertEqual(self.device.status, AgentDevice.STATUS_REVOKED)
         self.assertEqual(self.pair(outstanding_code).status_code, 400)
 
+    def test_a_readmitted_device_reads_as_awaiting_pairing(self):
+        """Issuing a code for a revoked machine is readmitting it.
+
+        Leaving it reading "Revoked" beside a code an administrator has just
+        handed out would describe neither state.
+        """
+        self.device.revoke()
+        self.assertEqual(self.device.status, AgentDevice.STATUS_REVOKED)
+
+        self.device.issue_pairing_code()
+
+        self.assertEqual(self.device.status, AgentDevice.STATUS_AWAITING_PAIRING)
+
+    def test_a_rotating_device_still_reads_as_paired(self):
+        self.device.issue_pairing_code()
+
+        self.assertEqual(self.device.status, AgentDevice.STATUS_PAIRED)
+
     def test_a_revoked_device_comes_back_by_re_pairing(self):
         self.device.revoke()
         code = self.device.issue_pairing_code()

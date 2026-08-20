@@ -52,6 +52,16 @@ class AgentDevice(models.Model):
         STATUS_UNPAIRED: _("Not paired"),
     }
 
+    #: How each status reads in Wagtail's help-block vocabulary. Kept beside
+    #: the statuses themselves so the admin template asks rather than
+    #: re-deriving the ladder from raw status strings.
+    STATUS_TONES = {
+        STATUS_PAIRED: "help-info",
+        STATUS_AWAITING_PAIRING: "help-warning",
+        STATUS_REVOKED: "help-critical",
+        STATUS_UNPAIRED: "help-warning",
+    }
+
     name = models.CharField(
         max_length=255,
         unique=True,
@@ -138,17 +148,27 @@ class AgentDevice(models.Model):
 
     @property
     def status(self):
-        if self.is_revoked:
-            return self.STATUS_REVOKED
+        # Order matters, and it is the order of what is true *now*. A
+        # working token wins over an outstanding rotation code, because the
+        # machine is still shipping data. A live code wins over a past
+        # revocation, because issuing one is an administrator readmitting
+        # the machine -- reporting "Revoked" beside a code an administrator
+        # has just handed out would describe neither.
         if self.is_paired:
             return self.STATUS_PAIRED
         if self.pairing_code_is_valid:
             return self.STATUS_AWAITING_PAIRING
+        if self.is_revoked:
+            return self.STATUS_REVOKED
         return self.STATUS_UNPAIRED
 
     @property
     def status_label(self):
         return self.STATUS_LABELS[self.status]
+
+    @property
+    def status_tone(self):
+        return self.STATUS_TONES[self.status]
 
     # ``request.user`` is set to the device on agent endpoints, so it has to
     # answer the two questions Django asks of any user-shaped object. This is

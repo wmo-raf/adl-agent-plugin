@@ -5,15 +5,15 @@
     fragments with no extra_css block of their own, so this leans entirely
     on Wagtail's help-block idiom rather than introducing CSS.
 
+    Which state the device is in is asked of the device, never re-derived
+    here from raw status strings -- the ladder lives once, on the model.
+
     The two actions are links, not forms: this fragment renders inside the
     edit form and a nested form would be invalid. Each link leads to its own
     confirmation page, which is where the POST happens.
 {% endcomment %}
 
-<div class="help-block
-    {% if status == 'revoked' %}help-critical
-    {% elif status == 'paired' %}help-info
-    {% else %}help-warning{% endif %}">
+<div class="help-block {{ status_tone }}">
 
     <p><strong>{{ status_label }}</strong></p>
 
@@ -25,13 +25,13 @@
         <p>
             {% blocktrans with expires=pairing_code_expires_at %}Type this into the ADL Agent on the machine before {{ expires }}. It works once, and only once.{% endblocktrans %}
         </p>
-    {% elif status == 'revoked' %}
+    {% elif device.is_revoked %}
         <p>
             {% blocktrans with revoked=device.revoked_at %}Revoked on {{ revoked }}. This machine's token no longer works and it has no pairing code. Issue a new code to let it back in.{% endblocktrans %}
         </p>
-    {% elif status == 'unpaired' %}
+    {% elif not device.is_paired %}
         <p>
-            {% trans "This device has no valid pairing code and has never paired. Issue a code to enroll the machine." %}
+            {% trans "This device has no valid pairing code. Issue one to enroll the machine, or to let a machine that has lost its token back in." %}
         </p>
     {% endif %}
 
@@ -50,7 +50,7 @@
         <a href="{{ issue_code_url }}" class="button button-small button-secondary">
             {% if device.paired_at %}{% trans "Issue new pairing code" %}{% else %}{% trans "Issue pairing code" %}{% endif %}
         </a>
-        {% if status != 'revoked' %}
+        {% if not device.is_revoked %}
             <a href="{{ revoke_url }}" class="button button-small no">
                 {% trans "Revoke device" %}
             </a>
