@@ -36,6 +36,11 @@ arrived so the same bytes are never asked for twice.
 by ADL's ordinary ingestion pipeline, run on the connection's schedule and again, within
 seconds, whenever an upload cycle finishes.
 
+**Bounded disk, and the way back.** Staged bytes dropped on a per-connection retention
+schedule while the ledger row that remembers the file lives on, and a re-process action
+that turns received files into observations again — re-reading the bytes where ADL still
+has them, and asking the machine for them where it does not.
+
 ### Credentials
 
 |                | Pairing code                      | Device token                         |
@@ -241,7 +246,71 @@ processing is switched back on. That distinction is the point of pausing one.
 **Where failures are seen.** *Agent Station Data Files* under Snippets lists every file a
 machine has sent, with its status and the first line of its error as columns and a status
 filter, so an operator can ask a country for its failures alone. The whole error is on the
-file's own page.
+file's own page — and the failures, once the decoder is fixed, are what gets ticked and
+re-processed.
+
+### Bounded disk, and the way back
+
+Two halves of one problem. Staged bytes cannot be kept forever — a country sending a file
+every ten minutes fills a disk — but the ledger row that remembers a file must be, because
+a row pruned is a file eternally new and re-uploaded forever. So retention drops one and
+never the other, and what it costs is only ADL's ability to re-read a file for itself.
+Even that is recoverable, because the machine that sent it still has it.
+
+**Retention** is a nightly sweep, and a period per connection — 90 days after processing by
+default, empty to keep every byte. Three things it never prunes, each for its own reason:
+
+| Not pruned | Why |
+|---|---|
+| A file still waiting to be processed | Pruning it would strand it: bytes gone, nothing ever made of them, and a ledger row telling the machine not to send it again |
+| A file that failed | It is waiting for the decoder fix that is the only thing able to make anything of it — which is exactly when its bytes matter most |
+| Anything under a connection with no retention period | Keeping everything is a choice an instance is allowed to make |
+
+Bytes go; the row, its size, mtime, hash and everything ADL made of the file stay. So a
+pruned file is still one the manifest answers "nothing" about, and still one the drain
+passes over. The row's **Bytes** column says which of three states it is in — *Held*,
+*Pruned*, or *Awaiting re-send*.
+
+**Re-process** is the way back, offered as a bulk action on the file listing: an operator
+filters down to a station's failures, ticks them, and asks for all of them at once. A
+decoder fix never applies to one file.
+
+There are two routes, and which one a file takes is the row's answer rather than a question
+put to the operator — who would otherwise have to know where a retention boundary had
+fallen:
+
+| The file's bytes | What happens |
+|---|---|
+| Still staged | ADL decodes them again. The row goes back to `received`, the connection is nudged, and observations appear within seconds. Nothing is asked of the machine in the field — which is what staging bytes was for |
+| Pruned | ADL forgets the file's hash. The machine offers the file on its next manifest, is told to send it, and the upload resets the row on arrival |
+
+Two things make the second route reach. No hash an agent can compute equals `NULL`, so a
+cleared hash *is* the request; and the same cleared hash pulls the station's scan floor back
+down to that file, so a machine is not asked for something outside the window it looks at.
+A device whose configuration is cached also has its `config_version` moved, so it re-reads
+that floor rather than scanning past the file it is wanted for.
+
+**And the request lapses**, after a week. It has to widen that window by a lot — a pruned
+file is older than its retention period by construction, so it is always far behind the
+station's floor — but a pruned file is also one the vendor may long since have rotated
+away. A request that never lapsed would leave that station scanning months of settled
+folder every few minutes, for ever, for a file that is never coming. A week rather than the
+"next manifest" the contract speaks of, because a country server is allowed to be off for a
+few days and the request should still be waiting when it comes back.
+
+Lapsing is not a refusal, and costs nothing that cannot be had again. ADL still has no hash
+for the file, so a machine that *can* still see it is still told to send it — what stopped
+is only the widened window ADL was paying for. And pressing **Re-process** again re-arms the
+request.
+
+What a re-process of a pruned file deliberately does *not* touch is what ADL made of the
+previous bytes. That is still the truth until new ones land.
+
+The whole loop is watchable end to end. Let a file be processed, drop its bytes (wait for
+the nightly sweep, or run it now with `adl shell -c "from adl_agent_plugin.retention import
+prune_expired_files; prune_expired_files()"` after shortening the connection's retention),
+press **Re-process** on the row, and the machine's next manifest is asked for a file it
+delivered months ago — which arrives, is decoded, and becomes observations again.
 
 ### Configuration, and who owns which half
 
@@ -296,12 +365,13 @@ Both actions need change permission on the device, not merely admin access.
 
 **Agent Connections** and **Agent Station Links** appear alongside every other plugin's
 under Connections. A connection names the machine that sends its files, the decoder that
-reads them (and its CSV configuration, where the decoder needs one), and the variable
-mappings for the vendor's file columns; a station link binds one ADL station to one folder
+reads them (and its CSV configuration, where the decoder needs one), how long its staged
+bytes are kept, and the variable mappings for the vendor's file columns; a station link binds one ADL station to one folder
 on that machine, and may override a mapping the connection got wrong for it.
 
 **Agent Station Data Files** under Snippets is the file-by-file record: what arrived, what
-became of it, and why anything failed.
+became of it, why anything failed, and whether its bytes are still here. Ticking rows and
+pressing **Re-process** is how a decoder fix reaches data that has already arrived.
 
 Deleting a device that has connections is refused — the delete page offers no button. Take
 a machine out of service by revoking it, which cuts it off and leaves a country's folder
@@ -385,8 +455,11 @@ upload endpoints (the full diffing matrix, paging, hash and size verification, g
 size cap, re-upload in place, and what the watermark does as the ledger fills), the drain
 (a real vendor CSV becoming observation records, failure isolation, what a run reports it
 had to work with, idempotency under a held lock, and a grown file re-decoding), the nudge
-that makes an upload become observations without waiting for the clock, the admin pages,
-and the credential and variable-mapping rules on their own.
+that makes an upload become observations without waiting for the clock, retention (what the
+sweep drops, what it must never touch, and that a pruned file is neither offered nor drained
+again), both re-process routes end to end (a mapping fixed after the fact reaching a file
+already received; a pruned file asked for, re-uploaded and processed), the admin pages, and
+the credential and variable-mapping rules on their own.
 
 ## Getting started
 

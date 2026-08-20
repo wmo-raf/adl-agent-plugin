@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from adl.core.models import DataParameter, NetworkConnection, StationLink, Unit
 from adl.core.redaction import redact_secrets
 from adl_ftp_plugin.decoder_resolution import decoder_requires_config
@@ -26,6 +28,15 @@ from .credentials import (
 )
 from .panels import AgentDeviceIdentityPanel
 from .validators import validate_start_date
+
+
+#: How long staged bytes are kept after ADL has made observations of them,
+#: unless a connection says otherwise (decision #268). A quarter is long
+#: enough that a decoder fixed at the end of a rainy season can still be
+#: applied to the files it was fixed for, and short enough that an instance's
+#: disk is bounded by what a country sends in three months rather than by how
+#: long it has been running.
+DEFAULT_FILE_RETENTION_DAYS = 90
 
 
 class AgentDeviceQuerySet(models.QuerySet):
@@ -482,12 +493,35 @@ class AgentConnection(NetworkConnection):
         ),
     )
 
+    #: How long this connection's staged bytes are kept once ADL has made
+    #: observations of them. What outlives them is the ledger row, which is
+    #: what stops the machine offering the same file forever -- so what this
+    #: bounds is disk, not memory (story 22). Files that failed to process
+    #: keep their bytes whatever this says: they are waiting for the decoder
+    #: fix that is the only thing that can make anything of them.
+    file_retention_days = models.PositiveIntegerField(
+        default=DEFAULT_FILE_RETENTION_DAYS,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1)],
+        verbose_name=_("Staged File Retention (days)"),
+        help_text=_(
+            "Delete a file's staged bytes this many days after ADL processed "
+            "it. What ADL knows about the file is kept, so the machine is "
+            "never asked for it again; a file that failed to process keeps "
+            "its bytes whatever this says. Leave empty to keep every byte."
+        ),
+    )
+
     panels = NetworkConnection.panels + [
         FieldPanel("device"),
         MultiFieldPanel([
             FieldPanel("decoder"),
             FieldPanel("csv_config"),
         ], heading=_("Decoding")),
+        MultiFieldPanel([
+            FieldPanel("file_retention_days"),
+        ], heading=_("Staged Files")),
         InlinePanel(
             "variable_mappings",
             label=_("Variable Mapping"),
@@ -984,6 +1018,29 @@ def agent_data_file_path(instance, filename):
     )
 
 
+#: What a re-process did about one file. Which of the two it is is never
+#: asked of the operator, who would have to know what a retention sweep had
+#: got to; the row answers it by whether its bytes are still here.
+REPROCESS_REDECODED = "redecoded"
+REPROCESS_REOFFERED = "reoffered"
+
+#: How long a request for a pruned file's bytes goes on widening the window
+#: its machine scans.
+#:
+#: The request has to widen it at all, and by a lot: a pruned file is older
+#: than its connection's retention period by construction, so it is always far
+#: behind the station's floor. But a pruned file is also one the vendor may
+#: long since have rotated away, and a request that never lapsed would leave
+#: that station scanning months of settled folder every few minutes, forever,
+#: for a file that is never coming.
+#:
+#: A week rather than the "next manifest" the contract speaks of, because a
+#: country server is allowed to be off for a few days and the request should
+#: still be waiting when it comes back. Lapsing costs nothing that cannot be
+#: had again: pressing Re-process re-arms it.
+REOFFER_REQUEST_TTL = timedelta(days=7)
+
+
 class AgentFileStatus(models.TextChoices):
     """Where a staged file has got to (decision #268)."""
 
@@ -1011,8 +1068,10 @@ class AgentStationDataFile(models.Model):
 
     Rows are permanent even when their bytes are not. Pruning a row would
     make its file eternally new and re-uploaded forever; pruning the bytes
-    (a later slice) leaves the row to keep saying "held, and here is its
-    hash".
+    leaves the row to keep saying "delivered, and here is its hash" -- see
+    ``retention``. What is lost with the bytes is only ADL's ability to
+    re-read the file for itself, and even that is recoverable, because the
+    machine that sent it still has it -- see ``reprocessing``.
     """
 
     wagtail_reference_index_ignore = True
@@ -1078,6 +1137,13 @@ class AgentStationDataFile(models.Model):
     )
     last_error = models.TextField(
         blank=True, default="", verbose_name=_("Last Error"),
+    )
+    #: When ADL last asked for this file's bytes back, which is also how long
+    #: the row has been pulling its station's scan floor down. Cleared when the
+    #: file arrives, because the request has then been answered.
+    reoffer_requested_at = models.DateTimeField(
+        null=True, blank=True, verbose_name=_("Re-send Requested At"),
+        help_text=_("When ADL last asked the machine to send this file again."),
     )
 
     created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Created At"))
@@ -1148,6 +1214,7 @@ class AgentStationDataFile(models.Model):
             data_file.size = entry.size
             data_file.mtime = entry.mtime
             data_file.content_hash = entry.content_hash
+            data_file.reoffer_requested_at = None
             data_file.received_at = now
             data_file.status = AgentFileStatus.RECEIVED
             data_file.processed_at = None
@@ -1231,6 +1298,134 @@ class AgentStationDataFile(models.Model):
         self.last_error = redact_secrets(error) or ""
         self.save(update_fields=self.OUTCOME_FIELDS)
 
+    def bytes_state(self):
+        """Whether this file's bytes are still here, in an operator's words.
+
+        Three states, and the difference between the last two is the whole of
+        the recovery story. Bytes dropped on a retention schedule are a file
+        ADL can no longer read for itself; a row whose hash has been cleared
+        is one ADL has asked the machine to send again, and is waiting for.
+        """
+        if self.file:
+            return _("Held")
+
+        if self.reoffer_request_is_live:
+            return _("Awaiting re-send")
+
+        return _("Pruned")
+
+    bytes_state.short_description = _("Bytes")
+
+    @property
+    def reoffer_request_is_live(self):
+        """Whether ADL is still actively asking for this file's bytes.
+
+        A lapsed request is not a refusal: the hash is still gone, so a machine
+        that does offer the file is still told to send it. What lapses is only
+        the widened window ADL was paying for -- see :data:`REOFFER_REQUEST_TTL`.
+        """
+        if self.content_hash is not None or self.reoffer_requested_at is None:
+            return False
+
+        return self.reoffer_requested_at >= dj_timezone.now() - REOFFER_REQUEST_TTL
+
+    @classmethod
+    def prunable_for(cls, connection):
+        """The rows on ``connection`` whose bytes have outlived their keep.
+
+        Three conditions, and each excludes something that would be a bug to
+        prune. Only ``processed`` rows: a file still waiting would be stranded
+        -- bytes gone, nothing ever made of them, and a ledger row telling the
+        machine not to send it again -- and a ``failed`` one is waiting for
+        the decoder fix that is the only thing able to make anything of it,
+        which is precisely when its bytes matter most. Only rows past the
+        cutoff, measured from when ADL processed them rather than when they
+        arrived, because it is the processing that makes them redundant. And
+        only rows that still have bytes, so a sweep that has already run costs
+        nothing to run again.
+        """
+        retention = connection.file_retention_days
+
+        if not retention:
+            # No retention period is not "prune immediately" -- it is an
+            # instance that has chosen to keep everything a country has sent.
+            return cls.objects.none()
+
+        cutoff = dj_timezone.now() - timedelta(days=retention)
+
+        return (
+            cls.objects.filter(
+                station_link__network_connection=connection,
+                status=AgentFileStatus.PROCESSED,
+                processed_at__lt=cutoff,
+            )
+            .exclude(file="")
+            .order_by("pk")
+        )
+
+    def prune_bytes(self):
+        """Drop the staged bytes; keep everything ADL knows about the file.
+
+        The row stays, hash and all, for the reason this class's own docstring
+        gives: it is what makes a machine stop offering a file it has already
+        delivered.
+
+        The row is written first and the bytes deleted on commit, as an upload
+        deletes the bytes it supersedes: a rollback that had already deleted
+        them would leave the row pointing at a file that is gone.
+        """
+        stored_as = self.file.name
+
+        if not stored_as:
+            return False
+
+        storage = self.file.storage
+        self.file = ""
+        self.save(update_fields=["file", "updated_at"])
+
+        transaction.on_commit(lambda: storage.delete(stored_as))
+
+        return True
+
+    def request_reprocess(self):
+        """Ask for this file to become observations again (story 21).
+
+        Two paths, and the row decides which by whether its bytes are still
+        staged -- so an operator pressing this on a page of files spanning a
+        retention boundary does not have to know where that boundary fell.
+
+        **Bytes held**: the row goes back to ``received`` and the next drain
+        decodes it again, with nothing asked of the machine in the field. That
+        also brings a ``failed`` file back, which is the case the action
+        mostly exists for: a decoder is fixed on ADL, and the files it was
+        fixed for are already here.
+
+        **Bytes pruned**: the only copy left is on the vendor's disk, so ADL
+        forgets what the file hashed to. No hash an agent can compute equals
+        nothing, so the next manifest asks for the file and the upload that
+        follows resets the row on arrival. The request is stamped as well as
+        made, because it has to be able to lapse -- see
+        :data:`REOFFER_REQUEST_TTL`. Deliberately nothing else is touched:
+        what ADL made of the previous bytes is still the truth until new ones
+        land.
+        """
+        if self.file:
+            self.status = AgentFileStatus.RECEIVED
+            self.processed_at = None
+            self.values_saved = None
+            self.last_error = ""
+            self.save(update_fields=self.OUTCOME_FIELDS)
+
+            return REPROCESS_REDECODED
+
+        self.content_hash = None
+        self.reoffer_requested_at = dj_timezone.now()
+        self.save(update_fields=[
+            "content_hash", "reoffer_requested_at", "updated_at",
+        ])
+
+        return REPROCESS_REOFFERED
+
     @classmethod
     def reoffer_points_for(cls, station_links):
         """The oldest file each link wants offered again: ``{link id: point}``.
@@ -1266,9 +1461,20 @@ class AgentStationDataFile(models.Model):
 
     @classmethod
     def _reoffer_points(cls, rows):
-        """One grouped query, whatever the number of links."""
+        """One grouped query, whatever the number of links.
+
+        Only requests still in force count. A request that has lapsed stops
+        pulling its station's floor down, so a file the vendor has rotated away
+        cannot leave that station scanning months of settled folder for ever
+        (see :data:`REOFFER_REQUEST_TTL`).
+        """
         return dict(
-            rows.filter(content_hash__isnull=True)
+            rows.filter(
+                content_hash__isnull=True,
+                reoffer_requested_at__gte=(
+                    dj_timezone.now() - REOFFER_REQUEST_TTL
+                ),
+            )
             .values("station_link_id")
             .annotate(point=models.Min("mtime"))
             .values_list("station_link_id", "point")

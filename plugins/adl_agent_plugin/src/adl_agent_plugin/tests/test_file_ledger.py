@@ -22,7 +22,7 @@ from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone as dj_timezone
 
-from adl_agent_plugin.models import AgentStationDataFile
+from adl_agent_plugin.models import REOFFER_REQUEST_TTL, AgentStationDataFile
 
 from .helpers import (
     SYNC_URL,
@@ -59,6 +59,20 @@ class WatermarkTestCase(TemporaryMediaRoot, TestCase):
             self.link, name, content or name.encode(), mtime=mtime
         )
         self.assertEqual(response.status_code, 201, response.content)
+
+    def ask_for_again(self, name, station_link=None):
+        """Prune a file's bytes and re-process it, as an operator would.
+
+        Through the real methods rather than by nulling the column, so that
+        what these tests describe stays what the admin action actually does.
+        """
+        data_file = AgentStationDataFile.objects.get(
+            station_link=station_link or self.link, file_name=name,
+        )
+        data_file.prune_bytes()
+        data_file.request_reprocess()
+
+        return data_file
 
 
 class EmptyLedgerTests(WatermarkTestCase):
@@ -133,22 +147,20 @@ class ReoffereredFileTests(WatermarkTestCase):
         self.receive("OLD.dat", self.hours_ago(70))
         self.receive("NEW.dat", self.hours_ago(2))
 
-        AgentStationDataFile.objects.filter(file_name="OLD.dat").update(
-            content_hash=None
-        )
+        self.ask_for_again("OLD.dat")
 
         self.assertEqual(self.watermark(), wire_datetime(self.hours_ago(70)))
 
     def test_a_file_already_inside_the_window_leaves_the_floor_alone(self):
         self.receive("NEW.dat", self.hours_ago(2))
 
-        AgentStationDataFile.objects.update(content_hash=None)
+        self.ask_for_again("NEW.dat")
 
         self.assertEqual(self.watermark(), wire_datetime(self.hours_ago(48)))
 
     def test_the_file_that_comes_down_to_is_then_asked_for(self):
         self.receive("OLD.dat", self.hours_ago(70), b"OLD.dat")
-        AgentStationDataFile.objects.update(content_hash=None)
+        self.ask_for_again("OLD.dat")
 
         entry = manifest_entry(
             self.link, "OLD.dat", b"OLD.dat", self.hours_ago(70)
@@ -158,12 +170,57 @@ class ReoffereredFileTests(WatermarkTestCase):
             self.agent.requested([entry]), [(self.link.pk, "OLD.dat")]
         )
 
+    def test_a_request_stops_widening_the_window_once_it_has_lapsed(self):
+        # The file was pruned because it was months old, and the vendor has
+        # long since rotated it away. Nothing is ever coming, and this station
+        # must not go on scanning a settled folder back to it for ever.
+        self.receive("OLD.dat", self.hours_ago(70))
+        data_file = self.ask_for_again("OLD.dat")
+
+        AgentStationDataFile.objects.filter(pk=data_file.pk).update(
+            reoffer_requested_at=dj_timezone.now() - REOFFER_REQUEST_TTL
+            - timedelta(minutes=1),
+        )
+
+        self.assertEqual(self.watermark(), wire_datetime(self.hours_ago(48)))
+
+    def test_a_lapsed_request_still_takes_the_file_if_it_is_offered(self):
+        # Lapsing is not a refusal. ADL has no hash for this file, so a
+        # machine that can still see it is told to send it -- the request
+        # stopped costing, it did not stop standing.
+        self.receive("OLD.dat", self.hours_ago(70), b"OLD.dat")
+        data_file = self.ask_for_again("OLD.dat")
+        AgentStationDataFile.objects.filter(pk=data_file.pk).update(
+            reoffer_requested_at=dj_timezone.now() - REOFFER_REQUEST_TTL
+            - timedelta(minutes=1),
+        )
+
+        entry = manifest_entry(
+            self.link, "OLD.dat", b"OLD.dat", self.hours_ago(70)
+        )
+
+        self.assertEqual(
+            self.agent.requested([entry]), [(self.link.pk, "OLD.dat")]
+        )
+
+    def test_asking_again_re_arms_a_lapsed_request(self):
+        self.receive("OLD.dat", self.hours_ago(70))
+        data_file = self.ask_for_again("OLD.dat")
+        AgentStationDataFile.objects.filter(pk=data_file.pk).update(
+            reoffer_requested_at=dj_timezone.now() - REOFFER_REQUEST_TTL
+            - timedelta(minutes=1),
+        )
+
+        AgentStationDataFile.objects.get(pk=data_file.pk).request_reprocess()
+
+        self.assertEqual(self.watermark(), wire_datetime(self.hours_ago(70)))
+
     def test_one_stations_request_does_not_move_another_stations_floor(self):
         other = create_station_link(
             self.connection, start_date=self.hours_ago(48)
         )
         self.receive("OLD.dat", self.hours_ago(70))
-        AgentStationDataFile.objects.update(content_hash=None)
+        self.ask_for_again("OLD.dat")
 
         body = self.client.get(SYNC_URL, **bearer(self.token)).json()
         floors = {

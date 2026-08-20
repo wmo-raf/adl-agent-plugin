@@ -5,6 +5,7 @@ from wagtail.admin.filters import WagtailFilterSet
 from wagtail.snippets.models import register_snippet
 from wagtail.snippets.views.snippets import SnippetViewSet
 
+from .bulk_actions import ReprocessBulkAction
 from .models import AgentStationDataFile
 from .views import issue_pairing_code, revoke_device
 from .viewsets import agent_device_viewset
@@ -31,6 +32,16 @@ def register_agent_device_viewset():
     return agent_device_viewset
 
 
+# Offering re-processing on the file listing (story 21). A bulk action rather
+# than a per-row button because the case it exists for is a decoder fix, which
+# never applies to one file: an operator filters the listing down to a
+# station's failures and asks for all of them at once.
+#
+# Registered by handing the class over rather than by decorating a function:
+# this hook collects classes, not callables that return one.
+hooks.register("register_bulk_action", ReprocessBulkAction)
+
+
 class AgentStationDataFileFilterSet(WagtailFilterSet):
     class Meta:
         model = AgentStationDataFile
@@ -45,6 +56,10 @@ class AgentStationDataFileViewSet(SnippetViewSet):
     rather than something to open each row for, and the status is a filter --
     an operator looking at a country wants its failures, not its thousands of
     quiet successes.
+
+    It is also where a fix gets applied: the re-process bulk action is offered
+    on the rows ticked here (story 21). Whether a file's bytes are still
+    staged decides which route that takes, so it is a column too.
     """
 
     model = AgentStationDataFile
@@ -54,7 +69,7 @@ class AgentStationDataFileViewSet(SnippetViewSet):
     inspect_view_enabled = True
     list_display = [
         "file_name", "station_link", "status", "error_summary",
-        "received_at", "processed_at", "values_saved",
+        "bytes_state", "received_at", "processed_at", "values_saved",
     ]
     search_fields = ["file_name"]
     filterset_class = AgentStationDataFileFilterSet
