@@ -28,6 +28,7 @@ from .serialization import (
     sync_payload,
     upload_payload,
 )
+from .tasks import nudge
 from .throttling import AgentPairThrottle
 
 
@@ -272,6 +273,12 @@ class AgentFileUploadView(AgentAPIView):
             data_file = AgentStationDataFile.record_upload(
                 station_link, entry, File(staged),
             )
+
+        # The machine has just told ADL there is work; waiting for the next
+        # scheduled pass to notice would throw away the latency that push
+        # delivery exists for. Coalesced per connection, so a cycle uploading
+        # forty files still asks once (see :mod:`adl_agent_plugin.tasks`).
+        nudge(station_link.network_connection)
 
         return Response(
             upload_payload(data_file, self.device),

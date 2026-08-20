@@ -1,4 +1,8 @@
 from adl.core.models import DataParameter, NetworkConnection, StationLink, Unit
+from adl.core.redaction import redact_secrets
+from adl_ftp_plugin.decoder_resolution import decoder_requires_config
+from adl_ftp_plugin.registries import ftp_decoder_registry
+from adl_ftp_plugin.utils import get_ftp_decoder_choices
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import models, transaction
@@ -451,8 +455,39 @@ class AgentConnection(NetworkConnection):
         help_text=_("The machine that sends this connection's files."),
     )
 
+    #: Which decoder reads this vendor's files, chosen from the FTP plugin's
+    #: registry. The agent ships raw files precisely so that this choice --
+    #: and every country-specific decoder already written against that
+    #: registry -- keeps working unchanged, and so that a decoder fix deploys
+    #: on ADL rather than on a machine in the field (story 12).
+    decoder = models.CharField(
+        max_length=255,
+        choices=get_ftp_decoder_choices,
+        verbose_name=_("Decoder"),
+        help_text=_(
+            "How this vendor's files are read. The list is every decoder "
+            "installed on this ADL instance."
+        ),
+    )
+    csv_config = models.ForeignKey(
+        "adl_ftp_plugin.StandardCSVConfig",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        verbose_name=_("CSV Configuration"),
+        help_text=_(
+            "Required by decoders that read a configurable CSV; ignored by "
+            "decoders that know their own format."
+        ),
+    )
+
     panels = NetworkConnection.panels + [
         FieldPanel("device"),
+        MultiFieldPanel([
+            FieldPanel("decoder"),
+            FieldPanel("csv_config"),
+        ], heading=_("Decoding")),
         InlinePanel(
             "variable_mappings",
             label=_("Variable Mapping"),
@@ -468,6 +503,31 @@ class AgentConnection(NetworkConnection):
     class Meta:
         verbose_name = _("Agent Connection")
         verbose_name_plural = _("Agent Connections")
+
+    def get_decoder(self):
+        """The registered decoder instance, ignoring configuration.
+
+        Named as the FTP plugin names it, because the FTP plugin's own helpers
+        duck-type a connection through this method.
+        """
+        return ftp_decoder_registry.get(self.decoder)
+
+    def clean(self):
+        """Refuse a decoder that has not been given what it needs.
+
+        Pure: it asks the registry what the chosen decoder requires and looks
+        at this row's own fields. The rule itself lives in the FTP plugin, so
+        this check and the one an ingestion run makes cannot drift apart.
+        """
+        super().clean()
+
+        if self.decoder and decoder_requires_config(self.decoder) and not self.csv_config:
+            raise ValidationError({
+                "csv_config": _(
+                    "A CSV configuration is required by the '%(decoder)s' "
+                    "decoder."
+                ) % {"decoder": self.get_decoder_display()},
+            })
 
 
 class AgentConnectionVariableMapping(Orderable):
@@ -1044,6 +1104,23 @@ class AgentStationDataFile(models.Model):
     def __str__(self):
         return f"{self.station_link} - {self.file_name}"
 
+    def error_summary(self):
+        """The first line of ``last_error``, short enough for a listing.
+
+        A failed file has to be diagnosable from the listing itself (story
+        20) -- an operator scanning a country's files should see *what* went
+        wrong without opening each one. The whole message is on the inspect
+        page.
+        """
+        if not self.last_error:
+            return ""
+
+        first_line = self.last_error.splitlines()[0]
+
+        return first_line if len(first_line) <= 120 else first_line[:117] + "..."
+
+    error_summary.short_description = _("Last Error")
+
     @classmethod
     def record_upload(cls, station_link, entry, content):
         """Take delivery of a verified file, and say what now stands.
@@ -1086,6 +1163,73 @@ class AgentStationDataFile(models.Model):
                 transaction.on_commit(lambda: storage.delete(superseded))
 
         return data_file
+
+    #: Written by both outcomes, so that neither can quietly leave a field
+    #: from the other run's verdict standing.
+    OUTCOME_FIELDS = [
+        "status", "processed_at", "values_saved", "last_error", "updated_at",
+    ]
+
+    @classmethod
+    def waiting_for(cls, station_link):
+        """The files this station has received and not yet been drained of.
+
+        Oldest first, so a backlog is turned into observations in the order it
+        was recorded rather than the order it happened to arrive -- and so a
+        run cut short by its time budget leaves the *newest* files waiting,
+        which is the half a later run can still catch up on cheaply.
+
+        A row with no bytes attached is passed over rather than failed. There
+        is nothing wrong with it; there is simply nothing to decode, and a
+        verdict on a file nobody has read would be a lie.
+        """
+        return (
+            cls.objects.filter(
+                station_link=station_link, status=AgentFileStatus.RECEIVED,
+            )
+            .exclude(file="")
+            .order_by("mtime", "pk")
+        )
+
+    def mark_processed(self, values_saved=None, processed_at=None):
+        """Record that this file's records are in the database.
+
+        "Processed" means persisted, not merely decoded -- the caller stamps
+        this only once core has flushed the file's records -- so
+        ``values_saved`` is what reached the database, which may be fewer than
+        the file held.
+        """
+        self.status = AgentFileStatus.PROCESSED
+        self.processed_at = processed_at or dj_timezone.now()
+        self.values_saved = values_saved
+        self.last_error = ""
+        self.save(update_fields=self.OUTCOME_FIELDS)
+
+    def mark_failed(self, error):
+        """Record that this file could not be decoded, and why.
+
+        A failed file is not retried: the same bytes fail the same way, and a
+        station re-reporting the same error every quarter of an hour teaches
+        an operator to stop reading. It is waiting for a decoder fix and a
+        deliberate re-process, or for the vendor to write the file again.
+
+        Reserve this for the *file* being wrong. Something that will be right
+        again on its own -- storage unreachable, the instance out of disk --
+        must leave the row ``received``, because nothing in this slice can
+        bring a failed row back.
+
+        The message is redacted on the way in. It is a decoder's exception
+        text, this is the only write point behind it, and the field is
+        rendered in the admin listing, on the inspect page and in worker logs
+        -- so a vendor path or storage URL carrying a credential is bounded
+        here rather than at each of those readers (architectural patterns,
+        "Secret redaction at the write point").
+        """
+        self.status = AgentFileStatus.FAILED
+        self.processed_at = None
+        self.values_saved = None
+        self.last_error = redact_secrets(error) or ""
+        self.save(update_fields=self.OUTCOME_FIELDS)
 
     @classmethod
     def reoffer_points_for(cls, station_links):

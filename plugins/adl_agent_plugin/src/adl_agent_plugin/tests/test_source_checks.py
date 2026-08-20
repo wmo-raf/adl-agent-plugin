@@ -44,20 +44,21 @@ class OlderCoreImportSafetyTests(SimpleTestCase):
     check".
     """
 
-    # Every module this plugin ships. Extend it as the plugin grows more.
-    MODULES = ["models.py", "plugins.py", "apps.py", "views.py",
-               "wagtail_hooks.py", "api_views.py", "authentication.py",
-               "credentials.py", "panels.py", "serialization.py", "urls.py",
-               "throttling.py", "validators.py", "viewsets.py"]
-
     DENIED = "adl.core.source_checks"
 
     def test_no_module_level_import_of_source_checks(self):
         package_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        for name in self.MODULES:
+
+        # Every module the plugin ships, found rather than listed: a
+        # hand-maintained list is one a later slice forgets to add to, and the
+        # module it forgot is exactly the one that would break an older core.
+        names = sorted(
+            entry for entry in os.listdir(package_dir) if entry.endswith(".py")
+        )
+        self.assertIn("plugins.py", names, "the package directory was not found")
+
+        for name in names:
             path = os.path.join(package_dir, name)
-            if not os.path.exists(path):
-                continue  # a module this plugin does not (yet) ship
             with open(path) as f:
                 tree = ast.parse(f.read())
             for node in ast.walk(tree):

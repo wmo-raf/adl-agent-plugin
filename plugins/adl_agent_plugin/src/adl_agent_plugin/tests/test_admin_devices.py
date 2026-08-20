@@ -6,30 +6,18 @@ the edit page, rotate it, revoke it.
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from django.urls import reverse
 
 from adl_agent_plugin.models import AgentDevice
 
 from .helpers import (
     PAIR_URL,
+    UNHASHED_STATICFILES,
     clear_pair_throttle,
     create_connection,
     create_device,
 )
-
-# Rendering a Wagtail admin page asks the staticfiles storage for hashed
-# asset names, and the test runner never runs collectstatic -- so the
-# manifest these pages resolve against does not exist. Serving static files
-# unhashed is a property of the test process, not of the plugin.
-UNHASHED_STATICFILES = override_settings(STORAGES={
-    "default": {
-        "BACKEND": "django.core.files.storage.FileSystemStorage",
-    },
-    "staticfiles": {
-        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
-    },
-})
 
 
 @UNHASHED_STATICFILES
