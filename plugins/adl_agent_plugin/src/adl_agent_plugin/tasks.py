@@ -1,5 +1,14 @@
 """
-Draining without waiting for the clock.
+When the agent plugin's own work happens.
+
+Two things run on a clock here, and they pull in opposite directions. The
+**nudge** makes a drain happen sooner than the schedule would, because a
+machine that has just uploaded has told ADL there is work. The nightly
+**retention sweep** lets staged bytes go once nobody needs them any more; what
+it prunes and what it must never touch is in ``retention``.
+
+Draining without waiting for the clock
+--------------------------------------
 
 Celery Beat already runs every connection on its interval, and that pass is
 the safety net: whatever a nudge misses, loses or arrives too early for is
@@ -27,10 +36,15 @@ from becoming a stampede:
 
 import logging
 
+from adl.config.celery import app
 from adl.core.tasks import INGESTION_QUEUE_NAME
 from celery import shared_task
+from celery.schedules import crontab
+from celery_singleton import Singleton
 from django.core.cache import cache
 from django.db import transaction
+
+from .retention import prune_expired_files
 
 logger = logging.getLogger(__name__)
 
@@ -103,3 +117,28 @@ def drain_agent_connection(connection_id):
         return
 
     connection.collect_data()
+
+
+@app.task(base=Singleton, bind=True)
+def run_agent_file_retention(self):
+    """Drop every connection's expired staged bytes (story 22).
+
+    A singleton, like every other nightly sweep in ADL: it walks the whole
+    ledger, and two of them running at once would be two workers deleting the
+    same files.
+    """
+    logger.info("[AGENT RETENTION] Pruning expired staged agent files")
+    pruned = prune_expired_files()
+    logger.info("[AGENT RETENTION] Pruned the bytes of %s staged file(s)", pruned)
+
+
+@app.on_after_finalize.connect
+def setup_periodic_tasks(sender, **kwargs):
+    # An hour after midnight rather than on it: core and the FTP plugin both
+    # run their nightly cleanups at midnight, and a sweep that walks every
+    # connection's ledger has no reason to queue behind them.
+    sender.add_periodic_task(
+        crontab(hour=1, minute=0),
+        run_agent_file_retention.s(),
+        name="run-agent-file-retention-daily",
+    )

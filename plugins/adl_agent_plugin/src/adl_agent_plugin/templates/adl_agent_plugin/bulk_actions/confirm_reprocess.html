@@ -1,0 +1,61 @@
+{% extends 'wagtailadmin/bulk_actions/confirmation/base.html' %}
+{% load i18n %}
+
+{% comment %}
+    The confirmation page for the re-process bulk action. It extends Wagtail's
+    own bulk-action confirmation base rather than ADL's generic admin base:
+    the page is rendered by a BulkAction view, whose context and blocks are
+    that base's, and whose sibling actions (delete) render through it too.
+
+    What it is careful to show is which route each file will take, because the
+    operator chose the files and not the route -- and "asked for again" is a
+    request to a machine in another country, which is worth seeing before
+    pressing.
+{% endcomment %}
+
+{% block titletag %}{% trans "Re-process files" %}{% endblock %}
+
+{% block header %}
+    {% trans "Re-process" as reprocess_str %}
+    {% include "wagtailadmin/shared/header.html" with title=reprocess_str subtitle=model_opts.verbose_name_plural|capfirst icon=header_icon only %}
+{% endblock header %}
+
+{% block items_with_access %}
+    {% if items %}
+        <p>
+            {% blocktrans trimmed count counter=items|length %}
+                Turn this file into observations again?
+            {% plural %}
+                Turn these {{ counter }} files into observations again?
+            {% endblocktrans %}
+        </p>
+        <p>
+            {% trans "A file whose bytes ADL still holds is decoded again within seconds, and the machine that sent it is asked for nothing. A file whose bytes have been pruned is asked for again, and arrives on its machine's next cycle." %}
+        </p>
+        <ul>
+            {% for file in items %}
+                <li>
+                    <a href="{{ file.edit_url }}" target="_blank" rel="noreferrer">{{ file.item.file_name }}</a>
+                    &mdash; {{ file.item.station_link }} ({{ file.item.bytes_state }})
+                </li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+{% endblock items_with_access %}
+
+{% block items_with_no_access %}
+    {% blocktrans trimmed asvar no_access_msg %}
+        You don't have permission to re-process these files
+    {% endblocktrans %}
+    {% include 'wagtailsnippets/bulk_actions/list_items_with_no_access.html' with items=items_with_no_access no_access_msg=no_access_msg %}
+{% endblock items_with_no_access %}
+
+{% block form_section %}
+    {% if items %}
+        {% trans 'Yes, re-process' as action_button_text %}
+        {% trans "No, don't re-process" as no_action_button_text %}
+        {% include 'wagtailadmin/bulk_actions/confirmation/form.html' %}
+    {% else %}
+        {% include 'wagtailadmin/bulk_actions/confirmation/go_back.html' %}
+    {% endif %}
+{% endblock form_section %}
