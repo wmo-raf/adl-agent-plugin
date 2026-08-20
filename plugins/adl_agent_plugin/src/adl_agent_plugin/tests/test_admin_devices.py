@@ -11,7 +11,12 @@ from django.urls import reverse
 
 from adl_agent_plugin.models import AgentDevice
 
-from .helpers import PAIR_URL, clear_pair_throttle
+from .helpers import (
+    PAIR_URL,
+    clear_pair_throttle,
+    create_connection,
+    create_device,
+)
 
 # Rendering a Wagtail admin page asks the staticfiles storage for hashed
 # asset names, and the test runner never runs collectstatic -- so the
@@ -40,7 +45,8 @@ class AgentDeviceAdminTests(TestCase):
 
     def create_device(self, name="Dar es Salaam server"):
         response = self.client.post(
-            reverse("agent_devices:add"), {"name": name, "description": ""},
+            reverse("agent_devices:add"),
+            {"name": name, "description": "", "check_interval_minutes": 5},
         )
         self.assertEqual(response.status_code, 302, response.content)
         return AgentDevice.objects.get(name=name)
@@ -145,3 +151,47 @@ class AgentDeviceAdminPermissionTests(TestCase):
 
         self.device.refresh_from_db()
         self.assertIsNone(self.device.revoked_at)
+
+
+@UNHASHED_STATICFILES
+class AgentDeviceDeletionTests(TestCase):
+    """Deleting a device is not how a machine is taken out of service.
+
+    Revoking is: it cuts the machine off and leaves its connections, station
+    links and folder configuration in place. Delete is for a device that was
+    never wired up, so a device that *is* wired up refuses -- losing a
+    country's folder configuration to a stray click is not a recoverable
+    mistake.
+    """
+
+    def setUp(self):
+        self.admin = get_user_model().objects.create_superuser(
+            username="hq", email="hq@example.com", password="hq-password",
+        )
+        self.client.force_login(self.admin)
+        self.device = create_device()
+
+    def delete_url(self):
+        return reverse("agent_devices:delete", args=[self.device.pk])
+
+    def test_an_unused_device_can_be_deleted(self):
+        self.assertContains(self.client.get(self.delete_url()), "Yes, delete")
+
+        response = self.client.post(self.delete_url())
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(AgentDevice.objects.filter(pk=self.device.pk).exists())
+
+    def test_a_device_with_connections_is_not_offered_for_deletion(self):
+        create_connection(self.device, name="Vendor A")
+
+        response = self.client.get(self.delete_url())
+
+        self.assertNotContains(response, "Yes, delete", status_code=200)
+
+    def test_a_device_with_connections_survives_the_attempt_anyway(self):
+        create_connection(self.device, name="Vendor A")
+
+        self.client.post(self.delete_url(), follow=True)
+
+        self.assertTrue(AgentDevice.objects.filter(pk=self.device.pk).exists())

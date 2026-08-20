@@ -16,9 +16,15 @@ design and the decision tickets behind it.
 
 **Device identity.** An operator creates an `AgentDevice` in the ADL admin and gets a
 single-use pairing code; the agent trades that code for a long-lived bearer token and uses
-it on every later call. Nothing else exists yet — connections, station links, the manifest
-and upload endpoints, and the drain into ADL's ingestion pipeline all arrive in later
-slices, and until then the plugin ingests nothing.
+it on every later call.
+
+**Configuration.** An `AgentConnection` per vendor on the machine, an `AgentStationLink` per
+station, and one `sync` call that hands a paired device everything it needs for a cycle.
+The machine's own settings — where the files sit, how they are named — are writable from
+the app; what the data means stays in the ADL admin.
+
+The manifest and upload endpoints, and the drain into ADL's ingestion pipeline, arrive in
+later slices; until then the plugin ingests nothing.
 
 ### Credentials
 
@@ -38,10 +44,12 @@ wrong code, not a mistyped separator.
 
 The versioned surface is `api/agent/v1/`, mounted by ADL under `plugins/`:
 
-| Endpoint                          | Auth          | What it does                              |
-|-----------------------------------|---------------|-------------------------------------------|
-| `POST /plugins/api/agent/v1/pair/`| none          | Trades a pairing code for a device token   |
-| `GET  /plugins/api/agent/v1/me/`  | device token  | What ADL believes about the calling device |
+| Endpoint                                                       | Auth         | What it does                                       |
+|----------------------------------------------------------------|--------------|----------------------------------------------------|
+| `POST  /plugins/api/agent/v1/pair/`                              | none         | Trades a pairing code for a device token           |
+| `GET   /plugins/api/agent/v1/me/`                                | device token | What ADL believes about the calling device         |
+| `GET   /plugins/api/agent/v1/sync/`                              | device token | The device's whole configuration, in one call      |
+| `PATCH /plugins/api/agent/v1/station-links/<id>/config/`         | device token | Writes the app's tier of one station link's config  |
 
 `pair` is the only endpoint that answers without a credential, and the only one that is
 rate-limited (30 attempts per client IP per hour by default; set
@@ -49,7 +57,51 @@ rate-limited (30 attempts per client IP per hour by default; set
 
 A device token is a credential on these endpoints and nowhere else — it is not accepted by
 ADL's core API or the Wagtail admin. A `401` from any agent endpoint means the device was
-revoked, and the agent should stop uploading and ask to be re-paired.
+revoked, and the agent should stop uploading and ask to be re-paired. Every authenticated
+call also records that the device was seen, which is the passive half of fleet liveness.
+
+Errors answer with one envelope: a `code` an agent switches on, a `detail` a technician
+reads, and — for a refused config write — either `fields` (what was not the app's to
+write) or `errors` (what did not validate, keyed by field).
+
+### Configuration, and who owns which half
+
+ADL stores every durable setting; the app is an editor writing through the API, holding
+only the ADL URL, its token, and a cache of the last configuration it fetched, so that it
+keeps shipping while ADL is unreachable. The split follows one rule: **what the data means
+is HQ's call; where the files sit and how they are named is the machine's.**
+
+| Tier             | Settings                                                                                                                                                   | Written from            |
+|------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------|
+| Admin-only       | Device lifecycle, which station a link is for, whether it is enabled, variable mappings, collection start date                                              | ADL admin               |
+| App-editable     | Local folder path, file pattern, folder-structure settings, listing strategy and its Direct Fetch settings, stability window                                | The app, or the admin   |
+| Per device       | Check interval — one loop per machine scans every folder it has                                                                                              | ADL admin               |
+
+The check interval sits in the app's tier in the design too, but the API contract has no
+device-scoped write — its five endpoints are pair, sync, manifest, files, and per-link
+config — so for now it is set in the admin. A device config `PATCH` is a small addition
+whenever the app needs one.
+
+`AgentStationLink.APP_EDITABLE_FIELDS` is that middle row, stated once: the sync response
+renders exactly it under `config`, and the config endpoint accepts exactly it. Anything
+else in a `PATCH` body is refused — an admin-tier field by name, a misspelled one as
+unknown — and the whole write is refused with it, so a machine is never left half
+configured.
+
+Both sides may write the app tier, so conflicts resolve **last-write-wins**: no `409`s,
+no merging. Every response carries a `config_version` for the device, which moves whenever
+anything in that device's configuration changes — a folder path written from the app, a
+mapping added in the admin, a station link deleted. An agent whose cached version has moved
+re-reads; that is the whole protocol.
+
+Each station link also carries a **watermark**: the oldest file it is worth offering ADL. It
+is a floor rather than a high-water mark — a file backfilled into the folder weeks late must
+still reach ADL — and today it is the link's collection start date. The file ledger, which
+arrives with the manifest slice, will make it better informed without changing its meaning.
+
+Station links and connections that an administrator has disabled are still sent, flagged
+rather than omitted, so the technician at the machine can see that a station is switched
+off centrally instead of watching it disappear.
 
 ### Admin
 
@@ -64,6 +116,15 @@ immediately; the device's page shows the code, its expiry, and the two actions:
 
 Both actions need change permission on the device, not merely admin access.
 
+**Agent Connections** and **Agent Station Links** appear alongside every other plugin's
+under Connections. A connection names the machine that sends its files and carries the
+variable mappings for the vendor's file columns; a station link binds one ADL station to
+one folder on that machine, and may override a mapping the connection got wrong for it.
+
+Deleting a device that has connections is refused — the delete page offers no button. Take
+a machine out of service by revoking it, which cuts it off and leaves a country's folder
+configuration intact.
+
 ### End to end, with curl
 
 ```bash
@@ -77,7 +138,24 @@ curl -X POST http://localhost:8080/plugins/api/agent/v1/pair/ \
 curl http://localhost:8080/plugins/api/agent/v1/me/ -H "Authorization: Bearer $TOKEN"
 # -> 200 {"id": 1, "name": "...", ...}
 
-# 3. Revoke the device in the admin, then repeat step 2
+# 3. Read the whole configuration for this device
+curl http://localhost:8080/plugins/api/agent/v1/sync/ -H "Authorization: Bearer $TOKEN"
+# -> 200 {"config_version": 5, "device": {...}, "connections": [{... "station_links": [...]}]}
+
+# 4. Point a station link at the folder the files are really in
+curl -X PATCH http://localhost:8080/plugins/api/agent/v1/station-links/1/config/ \
+     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"local_folder_path": "D:\\AWS\\Demo", "file_pattern": "DEMO_*.csv"}'
+# -> 200 {"station_link_id": 1, "config_version": 6, "config": {...}}
+# and the new path is on the station link's page in the admin.
+
+# 5. Try to move something that is not the app's to move
+curl -X PATCH http://localhost:8080/plugins/api/agent/v1/station-links/1/config/ \
+     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"start_date": "2020-01-01T00:00:00Z"}'
+# -> 400 {"code": "read_only_fields", "fields": ["start_date"], "detail": "..."}
+
+# 6. Revoke the device in the admin, then repeat step 2
 # -> 401 {"detail": "Invalid or revoked device token."}
 ```
 
@@ -93,9 +171,11 @@ Or, without needing the app container running:
 docker compose run --rm --entrypoint adl adl test --keepdb adl_agent_plugin.tests
 ```
 
-The suite drives the pairing lifecycle through the same HTTP surfaces a real agent and a
-real operator use — exchange, replay, expiry, revocation, rotation, the rate limit, and the
-authorization boundary — plus the credential rules on their own.
+The suite drives the plugin through the same surfaces a real agent and a real operator use:
+the pairing lifecycle over HTTP (exchange, replay, expiry, revocation, rotation, the rate
+limit, the authorization boundary), the sync and config endpoints (scope, both tiers, tier
+enforcement, validation, last-write-wins, version propagation, liveness), the admin pages,
+and the credential and variable-mapping rules on their own.
 
 ## Getting started
 

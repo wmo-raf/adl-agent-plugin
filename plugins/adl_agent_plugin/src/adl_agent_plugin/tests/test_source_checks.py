@@ -47,8 +47,8 @@ class OlderCoreImportSafetyTests(SimpleTestCase):
     # Every module this plugin ships. Extend it as the plugin grows more.
     MODULES = ["models.py", "plugins.py", "apps.py", "views.py",
                "wagtail_hooks.py", "api_views.py", "authentication.py",
-               "credentials.py", "panels.py", "urls.py",
-               "throttling.py", "viewsets.py"]
+               "credentials.py", "panels.py", "serialization.py", "urls.py",
+               "throttling.py", "validators.py", "viewsets.py"]
 
     DENIED = "adl.core.source_checks"
 
@@ -70,3 +70,23 @@ class OlderCoreImportSafetyTests(SimpleTestCase):
                 self.assertNotIn(
                     self.DENIED, [module] + names,
                     f"{name} imports {self.DENIED} at module level")
+
+
+class NoExternalSourceTests(SimpleTestCase):
+    """The agent inverts ADL's direction of travel, and the connection says so.
+
+    There is no host for ADL to dial and no credential for it to present: the
+    country server pushes to us. Declaring ``has_external_source = False`` is
+    what keeps layers 4 and 5 of the ingestion diagnostic answering
+    NOT_APPLICABLE instead of manufacturing a verdict about a network call ADL
+    never makes -- and keeps the probe buttons off a connection that could
+    never answer them. Agent liveness is reported from heartbeats instead.
+    """
+
+    def test_an_agent_connection_declares_no_external_source(self):
+        from adl_agent_plugin.models import AgentConnection
+
+        connection = AgentConnection()
+
+        self.assertFalse(connection.has_external_source)
+        self.assertFalse(connection.source_probe_supported)
