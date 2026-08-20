@@ -1,14 +1,33 @@
+import tempfile
+
 from django.core.exceptions import ValidationError
+from django.core.files import File
 from django.utils.translation import gettext as _
 from rest_framework import status
+from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from . import uploads
 from .authentication import AgentDeviceAuthentication, IsAgentDevice
 from .credentials import PairingError
-from .models import AgentDevice, AgentStationLink, ReadOnlyConfigFields
-from .serialization import config_write_payload, device_summary, sync_payload
+from .entries import parse_entry
+from .errors import AgentRequestRejected
+from .manifest import diff_against_ledger, read_manifest
+from .models import (
+    AgentDevice,
+    AgentStationDataFile,
+    AgentStationLink,
+    ReadOnlyConfigFields,
+)
+from .serialization import (
+    config_write_payload,
+    device_summary,
+    manifest_payload,
+    sync_payload,
+    upload_payload,
+)
 from .throttling import AgentPairThrottle
 
 
@@ -19,6 +38,11 @@ def error(code, detail, status_code=status.HTTP_400_BAD_REQUEST, **extra):
     sentence a technician reads.
     """
     return Response({"code": code, "detail": detail, **extra}, status=status_code)
+
+
+def rejection(exc):
+    """The same envelope, for a refusal raised from deeper in the plugin."""
+    return error(exc.code, exc.detail, exc.status_code, **exc.extra)
 
 
 class AgentAPIView(APIView):
@@ -36,6 +60,27 @@ class AgentAPIView(APIView):
     @property
     def device(self):
         return self.request.user
+
+    def find_station_link(self, station_link_id):
+        """This device's station link with that id, or ``None``.
+
+        Scoped through the device's own connections, so a lookup cannot
+        return another machine's link however its id was come by.
+        """
+        return (
+            AgentStationLink.for_device(self.device)
+            .filter(pk=station_link_id)
+            .first()
+        )
+
+    def no_such_station_link(self):
+        # Deliberately the same answer as a link that does not exist: a device
+        # has no business learning the ids of other machines' work.
+        return error(
+            "not_found",
+            _("No station link with that id is configured for this device."),
+            status.HTTP_404_NOT_FOUND,
+        )
 
 
 class AgentPairView(APIView):
@@ -114,13 +159,7 @@ class AgentStationLinkConfigView(AgentAPIView):
         station_link = self.find_station_link(pk)
 
         if station_link is None:
-            # Deliberately the same answer as a link that does not exist: a
-            # device has no business learning the ids of other machines' work.
-            return error(
-                "not_found",
-                _("No station link with that id is configured for this device."),
-                status.HTTP_404_NOT_FOUND,
-            )
+            return self.no_such_station_link()
 
         if not isinstance(request.data, dict):
             return error(
@@ -145,10 +184,96 @@ class AgentStationLinkConfigView(AgentAPIView):
             status=status.HTTP_200_OK,
         )
 
-    def find_station_link(self, pk):
-        """This device's station link with that id, or ``None``.
 
-        Scoped through the device's own connections, so the lookup cannot
-        return another machine's link however the id was come by.
-        """
-        return AgentStationLink.for_device(self.device).filter(pk=pk).first()
+class AgentManifestView(AgentAPIView):
+    """``POST api/agent/v1/manifest`` -- propose files, be told which to send.
+
+    One call per cycle for the whole machine, however many stations it
+    serves: these links are slow and a round trip per station would dominate
+    the cycle (decision #266).
+
+    Nothing here writes. The ledger only ever learns about a file from the
+    upload endpoint, so a cycle that dies between the two leaves ADL
+    believing exactly what it believed before -- and the next manifest offers
+    the same files again.
+    """
+
+    parser_classes = [JSONParser]
+
+    def post(self, request):
+        try:
+            entries = read_manifest(request.data)
+        except AgentRequestRejected as exc:
+            return rejection(exc)
+
+        diff = diff_against_ledger(self.device, entries)
+
+        return Response(
+            manifest_payload(self.device, diff), status=status.HTTP_200_OK,
+        )
+
+
+class AgentFileUploadView(AgentAPIView):
+    """``POST api/agent/v1/files`` -- one file, with the entry that promised it.
+
+    One file per request, so that a failure costs one file and the next
+    manifest heals it (decision #266). The bytes are checked against the
+    entry before anything is stored: ADL would rather hold nothing than hold
+    a file its ledger describes wrongly, because everything downstream --
+    dedup, re-processing, "what have we got for this station" -- trusts the
+    ledger to be true.
+    """
+
+    parser_classes = [MultiPartParser]
+
+    def post(self, request):
+        # A multipart body is a QueryDict of repeated keys; the entry is
+        # single-valued, so flatten it to the plain mapping ``parse_entry``
+        # reads and let that refuse anything else.
+        payload = request.data
+        if hasattr(payload, "dict"):
+            payload = payload.dict()
+
+        try:
+            entry = parse_entry(payload)
+        except AgentRequestRejected as exc:
+            return rejection(exc)
+
+        station_link = self.find_station_link(entry.station_link_id)
+
+        if station_link is None:
+            return self.no_such_station_link()
+
+        if not station_link.enabled:
+            # The manifest never asked for this, so an agent reaching here is
+            # working from a configuration ADL has since changed. Refused
+            # rather than quietly kept: a switched-off station should not
+            # accumulate files nobody will process.
+            return error(
+                "station_link_disabled",
+                _("This station is switched off in ADL and is not taking "
+                  "files."),
+                status.HTTP_409_CONFLICT,
+            )
+
+        # A real file on disk, not fifty megabytes of request in memory, and
+        # gone the moment storage has taken its own copy.
+        with tempfile.NamedTemporaryFile(suffix=f"-{entry.name}") as staged:
+            try:
+                uploads.receive(
+                    request.FILES.get("file"),
+                    request.data.get("encoding"),
+                    entry,
+                    staged,
+                )
+            except AgentRequestRejected as exc:
+                return rejection(exc)
+
+            data_file = AgentStationDataFile.record_upload(
+                station_link, entry, File(staged),
+            )
+
+        return Response(
+            upload_payload(data_file, self.device),
+            status=status.HTTP_201_CREATED,
+        )

@@ -815,16 +815,39 @@ class AgentStationLink(StationLink):
         """The floor core puts under this station's ingestion window."""
         return self.start_date
 
-    def get_manifest_watermark(self):
+    def manifest_watermark(self, reoffer_point=None):
         """The oldest file this station is worth offering ADL.
 
-        A **floor**, never a high-water mark: a file backfilled into the
-        folder weeks late must still reach ADL, so this cannot become
-        "the newest thing we have seen". Today it is the collection start
-        date; when the file ledger lands it will still be a floor, only a
-        better-informed one.
+        A **floor**, and only ever a floor. It is tempting to raise it to the
+        newest file ADL holds -- that is what would make a settled folder
+        cheap to offer -- but two of the promises this system makes forbid
+        it. A file backfilled into the folder weeks late must still reach ADL
+        (story 15), and a fresh install facing months of backlog uploads
+        newest first *so that history fills in behind* (story 18); a floor
+        that followed the newest arrival would close over both.
+
+        Raising it safely needs something ADL does not yet have: an agent
+        saying "I have offered you my whole folder down to here". That
+        assertion belongs to the reconciliation sweep, and so does the raise.
+        Until then the floor is the administrator's collection start date,
+        and what the ledger contributes is the power to pull it back *down*:
+        ``reoffer_point`` is the oldest file this link wants offered again,
+        and a request to re-send a file nobody would be asked for is not a
+        request at all.
+
+        Callers with many links to serve pass the point in, having read them
+        all in one query (see
+        :meth:`AgentStationDataFile.reoffer_points_for_connections`).
         """
-        return self.start_date
+        if self.start_date is None:
+            # No floor at all: everything the agent can see is fair game, so
+            # there is nothing for an outstanding file to pull down to.
+            return None
+
+        if reoffer_point is None:
+            return self.start_date
+
+        return min(self.start_date, reoffer_point)
 
     def app_config(self):
         """The app-editable tier, as it goes on the wire.
@@ -885,6 +908,255 @@ class AgentStationLink(StationLink):
         ])
 
         self.save(update_fields=[*data, "modified_at"])
+
+
+def agent_data_file_path(instance, filename):
+    """Where an uploaded file's bytes go on the default storage.
+
+    Filed by connection and station rather than by device: it is the station
+    the file belongs to, and a machine being replaced should not scatter one
+    station's history across two folders.
+    """
+    station_link = instance.station_link
+    return (
+        f"agent_data_files/{station_link.network_connection_id}"
+        f"/{station_link.station_id}/{filename}"
+    )
+
+
+class AgentFileStatus(models.TextChoices):
+    """Where a staged file has got to (decision #268)."""
+
+    RECEIVED = "received", _("Received — waiting to be processed")
+    PROCESSED = "processed", _("Processed")
+    FAILED = "failed", _("Failed to process")
+
+
+class AgentStationDataFile(models.Model):
+    """One file, on one station, as ADL knows it.
+
+    This single row is two things at once, and deliberately so (decision
+    #268). It is the **ledger** entry the manifest diffs against -- name,
+    size, mtime and content hash -- which is how a stateless agent is told
+    what to send without ADL ever missing or duplicating a file. And it is
+    the **staging** record: the bytes themselves on default storage, and how
+    far ADL has got with turning them into observations.
+
+    There is one row per (station link, filename), for the life of that
+    filename. A file that grows -- the daily CSV a logger appends to -- comes
+    again in full and updates this row in place: new bytes, new hash, state
+    back to received. The ledger says what that filename *is now*, not what
+    it has been; the observation records are the durable history, and the
+    core's upsert makes re-ingesting an overlap harmless.
+
+    Rows are permanent even when their bytes are not. Pruning a row would
+    make its file eternally new and re-uploaded forever; pruning the bytes
+    (a later slice) leaves the row to keep saying "held, and here is its
+    hash".
+    """
+
+    wagtail_reference_index_ignore = True
+
+    station_link = models.ForeignKey(
+        AgentStationLink, on_delete=models.CASCADE, related_name="data_files",
+        verbose_name=_("Agent Station Link"),
+    )
+    file_name = models.CharField(max_length=255, verbose_name=_("File Name"))
+
+    # ---------- the ledger ----------
+
+    size = models.PositiveBigIntegerField(
+        verbose_name=_("Size (bytes)"),
+        help_text=_("Size of the file as ADL received it."),
+    )
+    mtime = models.DateTimeField(
+        verbose_name=_("Last Modified"),
+        help_text=_(
+            "When the vendor software last wrote this file, as reported by "
+            "the machine. What the agent windows its folder scan on -- not an "
+            "observation time, which only the file's contents can say."
+        ),
+    )
+    #: Nullable, and its absence is a request rather than an absence: a row
+    #: with no hash is one ADL wants offered again, because no hash an agent
+    #: can compute equals NULL. That is how a re-process reaches a file whose
+    #: bytes have been pruned -- clear this, and the next manifest asks for it.
+    content_hash = models.CharField(
+        max_length=64, null=True, blank=True,
+        verbose_name=_("Content Hash"),
+        help_text=_("sha-256 of the file's bytes, verified on arrival."),
+    )
+
+    # ---------- the staged file ----------
+
+    file = models.FileField(
+        upload_to=agent_data_file_path, blank=True, verbose_name=_("File"),
+    )
+    received_at = models.DateTimeField(
+        null=True, blank=True, verbose_name=_("Received At"),
+    )
+
+    # ---------- what ADL has made of it ----------
+
+    status = models.CharField(
+        max_length=20,
+        choices=AgentFileStatus.choices,
+        default=AgentFileStatus.RECEIVED,
+        verbose_name=_("Status"),
+    )
+    processed_at = models.DateTimeField(
+        null=True, blank=True, verbose_name=_("Processed At"),
+        help_text=_("When this file's records were last persisted by ADL."),
+    )
+    values_saved = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("Values Saved"),
+        help_text=_(
+            "Observation values ADL kept from this file the last time it was "
+            "processed. 0 means it decoded but nothing was kept — typically a "
+            "variable-mapping or ingestion-window mismatch."
+        ),
+    )
+    last_error = models.TextField(
+        blank=True, default="", verbose_name=_("Last Error"),
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Created At"))
+    updated_at = models.DateTimeField(auto_now=True, verbose_name=_("Updated At"))
+
+    class Meta:
+        verbose_name = _("Agent Station Data File")
+        verbose_name_plural = _("Agent Station Data Files")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["station_link", "file_name"],
+                name="unique_agent_file_per_station_link",
+            ),
+        ]
+        indexes = [
+            # The drain's question: what is waiting on this station?
+            models.Index(fields=["station_link", "status"],
+                         name="idx_agentfile_link_status"),
+            # The watermark's: how far has this station's ledger got?
+            models.Index(fields=["station_link", "mtime"],
+                         name="idx_agentfile_link_mtime"),
+        ]
+
+    def __str__(self):
+        return f"{self.station_link} - {self.file_name}"
+
+    @classmethod
+    def record_upload(cls, station_link, entry, content):
+        """Take delivery of a verified file, and say what now stands.
+
+        The row is written in place under a lock, so that two uploads of the
+        same growing file -- a retry racing the cycle that gave up on it --
+        leave one row describing one of them, never a mixture.
+
+        Everything ADL had made of the previous bytes is cleared: what was
+        decided about a shorter version of a file says nothing about this
+        one. The bytes it replaces are deleted after the transaction commits,
+        so a rollback can never leave the row pointing at a file that is gone.
+        """
+        now = dj_timezone.now()
+
+        with transaction.atomic():
+            data_file, created = cls.objects.select_for_update().get_or_create(
+                station_link=station_link,
+                file_name=entry.name,
+                defaults={"size": entry.size, "mtime": entry.mtime},
+            )
+
+            superseded = data_file.file.name if not created else None
+
+            data_file.size = entry.size
+            data_file.mtime = entry.mtime
+            data_file.content_hash = entry.content_hash
+            data_file.received_at = now
+            data_file.status = AgentFileStatus.RECEIVED
+            data_file.processed_at = None
+            data_file.values_saved = None
+            data_file.last_error = ""
+
+            # Saves the row as well as the bytes: storage may hand the file a
+            # name of its own choosing, and the row has to carry that one.
+            data_file.file.save(entry.name, content, save=True)
+
+            if superseded and superseded != data_file.file.name:
+                storage = data_file.file.storage
+                transaction.on_commit(lambda: storage.delete(superseded))
+
+        return data_file
+
+    @classmethod
+    def reoffer_points_for(cls, station_links):
+        """The oldest file each link wants offered again: ``{link id: point}``.
+
+        A row with no content hash is one ADL wants back -- that is how a
+        re-process reaches a file whose staged bytes have been pruned. Links
+        with nothing outstanding are absent from the result.
+        """
+        link_ids = [link.pk for link in station_links]
+
+        if not link_ids:
+            return {}
+
+        return cls._reoffer_points(
+            cls.objects.filter(station_link_id__in=link_ids)
+        )
+
+    @classmethod
+    def reoffer_points_for_connections(cls, connections):
+        """The same, for every station link on these connections.
+
+        The sync response wants this for a whole device at once -- a machine
+        with two vendors and forty stations is meant to be one call, not
+        forty-two -- so the grouping is done here, in one query over the
+        ledger, rather than by whoever is assembling the response.
+        """
+        if not connections:
+            return {}
+
+        return cls._reoffer_points(
+            cls.objects.filter(station_link__network_connection__in=connections)
+        )
+
+    @classmethod
+    def _reoffer_points(cls, rows):
+        """One grouped query, whatever the number of links."""
+        return dict(
+            rows.filter(content_hash__isnull=True)
+            .values("station_link_id")
+            .annotate(point=models.Min("mtime"))
+            .values_list("station_link_id", "point")
+        )
+
+    @classmethod
+    def held_hashes(cls, keys):
+        """``{(station link id, name): hash}`` for the files ADL already knows.
+
+        ``keys`` is an iterable of ``(station link id, file name)``. One query
+        for a whole manifest page, and rows ADL has no hash for answer
+        ``None`` -- which no hash an agent can compute equals, so those files
+        are asked for again.
+        """
+        keys = set(keys)
+
+        if not keys:
+            return {}
+
+        # Filtered on each side of the pair and then narrowed in memory: a
+        # page of five hundred names is one index scan this way, against five
+        # hundred OR'd pairs the honest way.
+        rows = cls.objects.filter(
+            station_link_id__in={link_id for link_id, _name in keys},
+            file_name__in={name for _link_id, name in keys},
+        ).values_list("station_link_id", "file_name", "content_hash")
+
+        return {
+            (link_id, name): file_hash
+            for link_id, name, file_hash in rows
+            if (link_id, name) in keys
+        }
 
 
 class AgentStationLinkVariableMapping(Orderable):

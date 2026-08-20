@@ -1,10 +1,16 @@
 """Shared arrangement for the agent plugin's HTTP-seam tests."""
 
+import gzip
+import hashlib
 import itertools
+import tempfile
 
 from django.contrib.gis.geos import Point
 from django.core.cache import cache
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
 from django.urls import reverse
+from django.utils import timezone as dj_timezone
 
 from adl.core.models import DataParameter, Network, Station, Unit
 from adl_agent_plugin.models import (
@@ -19,6 +25,8 @@ from adl_agent_plugin.throttling import AgentPairThrottle
 PAIR_URL = reverse("plugins:adl_agent:pair")
 ME_URL = reverse("plugins:adl_agent:device_me")
 SYNC_URL = reverse("plugins:adl_agent:sync")
+MANIFEST_URL = reverse("plugins:adl_agent:manifest")
+FILES_URL = reverse("plugins:adl_agent:files")
 
 
 def station_link_config_url(station_link):
@@ -157,3 +165,76 @@ def wire_datetime(value):
         return None
     rendered = value.isoformat()
     return rendered[:-6] + "Z" if rendered.endswith("+00:00") else rendered
+
+
+# ---------------------------------------------------------------------------
+# Files, as an agent offers and sends them
+# ---------------------------------------------------------------------------
+
+def sha256_of(content):
+    """The content hash an agent computes over a file before offering it."""
+    return hashlib.sha256(content).hexdigest()
+
+
+def manifest_entry(station_link, name, content, mtime=None, **overrides):
+    """One candidate file, in the shape the manifest endpoint reads."""
+    entry = {
+        "station_link_id": getattr(station_link, "pk", station_link),
+        "name": name,
+        "size": len(content),
+        "mtime": (mtime or dj_timezone.now()).isoformat(),
+        "hash": sha256_of(content),
+    }
+    entry.update(overrides)
+    return entry
+
+
+class AgentClient:
+    """A paired device, driving the file endpoints the way the app does."""
+
+    def __init__(self, test_case, token):
+        self.client = test_case.client
+        self.token = token
+
+    def manifest(self, entries):
+        return self.client.post(
+            MANIFEST_URL,
+            data={"files": list(entries)},
+            content_type="application/json",
+            **bearer(self.token),
+        )
+
+    def requested(self, entries):
+        """The ``(station_link_id, name)`` pairs ADL asks for."""
+        body = self.manifest(entries).json()
+        return [(f["station_link_id"], f["name"]) for f in body["requested"]]
+
+    def upload(self, station_link, name, content, compress=False, **overrides):
+        payload = manifest_entry(station_link, name, content, **overrides)
+
+        if compress:
+            payload["encoding"] = "gzip"
+            content = gzip.compress(content)
+
+        payload["file"] = SimpleUploadedFile(
+            name, content, content_type="application/octet-stream"
+        )
+
+        return self.client.post(FILES_URL, data=payload, **bearer(self.token))
+
+
+class TemporaryMediaRoot:
+    """Keep bytes written by a test out of the developer's media folder."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._media_dir = tempfile.TemporaryDirectory()
+        cls._media_override = override_settings(MEDIA_ROOT=cls._media_dir.name)
+        cls._media_override.enable()
+        super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        cls._media_override.disable()
+        cls._media_dir.cleanup()

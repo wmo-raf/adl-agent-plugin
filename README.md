@@ -6,8 +6,9 @@ dialing in to fetch them. Many of the services ADL serves have no public IP and 
 ports; inverting the direction is what makes ingestion possible at all for them.
 
 This repository is the ADL-side half: the API those machines call, the admin an operator
-manages them from, and (in later slices) the staging store and drain that turn pushed files
-into observations. The Windows application lives in `wmo-raf/adl-agent`.
+manages them from, the staging store their files land in, and (in a later slice) the drain
+that turns those files into observations. The Windows application lives in
+`wmo-raf/adl-agent`.
 
 See the spec in [wmo-raf/adl#269](https://github.com/wmo-raf/adl/issues/269) for the whole
 design and the decision tickets behind it.
@@ -23,8 +24,12 @@ station, and one `sync` call that hands a paired device everything it needs for 
 The machine's own settings — where the files sit, how they are named — are writable from
 the app; what the data means stays in the ADL admin.
 
-The manifest and upload endpoints, and the drain into ADL's ingestion pipeline, arrive in
-later slices; until then the plugin ingests nothing.
+**Files.** A `manifest` call that tells a machine which of its files ADL wants, a `files`
+call that takes one of them, and an `AgentStationDataFile` ledger that remembers what
+arrived so the same bytes are never asked for twice.
+
+The drain into ADL's ingestion pipeline arrives in a later slice; until then files are
+staged and nothing is decoded.
 
 ### Credentials
 
@@ -49,6 +54,8 @@ The versioned surface is `api/agent/v1/`, mounted by ADL under `plugins/`:
 | `POST  /plugins/api/agent/v1/pair/`                              | none         | Trades a pairing code for a device token           |
 | `GET   /plugins/api/agent/v1/me/`                                | device token | What ADL believes about the calling device         |
 | `GET   /plugins/api/agent/v1/sync/`                              | device token | The device's whole configuration, in one call      |
+| `POST  /plugins/api/agent/v1/manifest/`                          | device token | Offers candidate files, answers with the ones to send |
+| `POST  /plugins/api/agent/v1/files/`                             | device token | Takes one file, verified against its manifest entry |
 | `PATCH /plugins/api/agent/v1/station-links/<id>/config/`         | device token | Writes the app's tier of one station link's config  |
 
 `pair` is the only endpoint that answers without a credential, and the only one that is
@@ -61,8 +68,101 @@ revoked, and the agent should stop uploading and ask to be re-paired. Every auth
 call also records that the device was seen, which is the passive half of fleet liveness.
 
 Errors answer with one envelope: a `code` an agent switches on, a `detail` a technician
-reads, and — for a refused config write — either `fields` (what was not the app's to
-write) or `errors` (what did not validate, keyed by field).
+reads, and whatever else that refusal owes the caller — `fields` for a config write that
+reached outside the app's tier, `errors` for entries that could not be read (each with its
+`index` in the batch), `limit` for a batch or file that was too big, `declared`/`actual`
+for a file whose bytes did not match its entry.
+
+### Files: propose, send, remember
+
+The agent keeps no record of what it has already delivered — the vendor's folder is its
+only state, and a folder cannot remember. So each cycle it *offers* what it can see and is
+told what to send:
+
+1. **Manifest.** One call for the whole machine, however many stations it serves, listing
+   candidate files as `(station_link_id, name, size, mtime, hash)`. ADL diffs each against
+   its ledger and answers with the ones it wants. Nothing is written — a proposal is not an
+   arrival, so a cycle that dies between the manifest and the uploads leaves ADL believing
+   exactly what it believed before.
+2. **Upload.** One file per request, multipart, carrying its manifest entry alongside the
+   bytes. ADL hashes what arrives and checks it against what was promised before storing
+   anything.
+
+The diff is on name and hash alone:
+
+| The agent offers                              | ADL answers   |
+|-----------------------------------------------|---------------|
+| a name the ledger has never held              | send it       |
+| a name whose hash matches what is held        | nothing       |
+| a name whose hash differs — a grown daily CSV | send it again |
+| a name whose ledger hash has been cleared     | send it again |
+
+The last row is the re-process path: a file whose staged bytes have been pruned is asked
+for again simply by clearing its ledger hash, because no hash an agent can compute equals
+`NULL`. A whole file always comes again, never a delta — the core's upsert by observation
+time makes re-ingesting the overlap harmless.
+
+**The ledger.** One `AgentStationDataFile` per (station link, filename), for the life of
+that filename. It is both the ledger row the manifest diffs against and the staging record
+the drain will read: the ledger fields, the bytes on Django's default storage (plain disk,
+or MinIO/S3 through a storage class — no object-store code lives here), and a
+`received / processed / failed` status with `processed_at`, `values_saved` and
+`last_error` beside it. A changed file updates the row **in place**, and everything ADL had
+made of the previous bytes is cleared with it: what was decided about a shorter version of
+a file says nothing about this one. The bytes it replaces are deleted once the row that
+replaced them has committed.
+
+Rows are permanent even where their bytes are not — pruning a row would make its file
+eternally new and re-uploaded forever.
+
+**The watermark**, which each station link carries in `sync`, is the oldest point a
+station's files are still worth offering from. It is a **floor**, and only ever a floor.
+
+It is tempting to raise it to the newest file ADL holds — that is what would make a settled
+folder cheap to offer every five minutes — but two of the promises this system makes forbid
+it. A file backfilled into the folder weeks late must still reach ADL, and a fresh install
+facing months of backlog uploads newest first *so that history fills in behind*; a floor
+that followed the newest arrival would close over both. Raising it safely needs something
+ADL does not yet have: an agent saying "I have offered you my whole folder down to here".
+That assertion belongs to the reconciliation sweep, and so does the raise.
+
+So the floor is the collection start date, and what the ledger contributes is the power to
+pull it back **down**: to the oldest file this link is waiting to be offered again. A
+request to re-send a file nobody would be asked for is not a request at all.
+
+**Limits**, both stated in every `sync` and `manifest` response under `limits` so a fleet
+in the field follows a change without being reinstalled:
+
+- `manifest_entries` — 500 candidate files per call. A longer manifest is **refused**, not
+  truncated: an agent told about the first five hundred of its files would take ADL's
+  silence about the rest for "already held" and never offer them again. The agent pages.
+- `file_bytes` — 50 MB per file, after decompression, enforced as the bytes arrive rather
+  than measured afterwards.
+
+**Verification.** The declared size is checked as well as the hash, because size is the one
+an agent can get wrong honestly — a file that grew between being stat'ed and being read —
+and `size_mismatch` tells a technician something a digest mismatch does not. Either way
+nothing is stored and no ledger row is touched: the file is simply offered again next
+cycle. Filenames are checked too; a name carrying a folder, or reaching out of one, is
+refused before it can name anything in storage.
+
+**Compression** is optional. Send `encoding=gzip` as a form field alongside the file and
+ADL decompresses as it reads. The hash is always over the file as it sits on the vendor's
+disk, never over the compressed form, so switching compression on cannot make ADL
+re-request everything it already holds.
+
+A form field rather than the `Content-Encoding` header the API decision named: that header
+describes the whole request body, and gzipping a whole multipart body would leave the
+server unable to find the parts at all. Compression here is a property of one part, so it
+is one part's field to carry.
+
+**Switched-off stations** take no files: a station link an administrator has disabled is
+reported in the manifest response under `disabled_station_links` and never asked for
+anything, and an upload for one is refused with `409 station_link_disabled`. A station link
+the device does not own — deleted centrally, or never its own — is reported under
+`unknown_station_links` rather than raised, so one stale entry from a cached configuration
+does not cost the machine the rest of its cycle. Pausing a *connection's* processing does
+not stop its files arriving; it stops them being processed, which is the point of pausing.
 
 ### Configuration, and who owns which half
 
@@ -94,10 +194,9 @@ anything in that device's configuration changes — a folder path written from t
 mapping added in the admin, a station link deleted. An agent whose cached version has moved
 re-reads; that is the whole protocol.
 
-Each station link also carries a **watermark**: the oldest file it is worth offering ADL. It
-is a floor rather than a high-water mark — a file backfilled into the folder weeks late must
-still reach ADL — and today it is the link's collection start date. The file ledger, which
-arrives with the manifest slice, will make it better informed without changing its meaning.
+Each station link also carries a **watermark**: the oldest file it is worth offering ADL,
+derived from the ledger and the collection start date together — see
+[Files](#files-propose-send-remember) above.
 
 Station links and connections that an administrator has disabled are still sent, flagged
 rather than omitted, so the technician at the machine can see that a station is switched
@@ -155,9 +254,29 @@ curl -X PATCH http://localhost:8080/plugins/api/agent/v1/station-links/1/config/
      -d '{"start_date": "2020-01-01T00:00:00Z"}'
 # -> 400 {"code": "read_only_fields", "fields": ["start_date"], "detail": "..."}
 
-# 6. Revoke the device in the admin, then repeat step 2
+# 6. Offer the files the machine can see
+curl -X POST http://localhost:8080/plugins/api/agent/v1/manifest/ \
+     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"files": [{"station_link_id": 1, "name": "DEMO_0220.csv", "size": 34,
+                     "mtime": "2026-02-20T10:00:00Z", "hash": "'"$HASH"'"}]}'
+# -> 200 {"requested": [{"station_link_id": 1, "name": "DEMO_0220.csv", "hash": "..."}], ...}
+
+# 7. Send one of the files it asked for
+curl -X POST http://localhost:8080/plugins/api/agent/v1/files/ \
+     -H "Authorization: Bearer $TOKEN" \
+     -F station_link_id=1 -F name=DEMO_0220.csv -F size=34 \
+     -F mtime=2026-02-20T10:00:00Z -F hash=$HASH \
+     -F file=@DEMO_0220.csv
+# -> 201 {"station_link_id": 1, "name": "DEMO_0220.csv", "status": "received", ...}
+
+# 8. Offer it again — ADL already has it
+#    (repeat step 6) -> 200 {"requested": [], ...}
+
+# 9. Revoke the device in the admin, then repeat step 2
 # -> 401 {"detail": "Invalid or revoked device token."}
 ```
+
+`$HASH` above is `shasum -a 256 DEMO_0220.csv`, which is exactly what the agent computes.
 
 ## Tests
 
@@ -174,8 +293,10 @@ docker compose run --rm --entrypoint adl adl test --keepdb adl_agent_plugin.test
 The suite drives the plugin through the same surfaces a real agent and a real operator use:
 the pairing lifecycle over HTTP (exchange, replay, expiry, revocation, rotation, the rate
 limit, the authorization boundary), the sync and config endpoints (scope, both tiers, tier
-enforcement, validation, last-write-wins, version propagation, liveness), the admin pages,
-and the credential and variable-mapping rules on their own.
+enforcement, validation, last-write-wins, version propagation, liveness), the manifest and
+upload endpoints (the full diffing matrix, paging, hash and size verification, gzip, the
+size cap, re-upload in place, and what the watermark does as the ledger fills), the admin
+pages, and the credential and variable-mapping rules on their own.
 
 ## Getting started
 

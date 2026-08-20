@@ -9,16 +9,17 @@ class AdlAgentPlugin(Plugin):
     dialing out to a country server, the country server pushes its files
     outbound over HTTPS. This plugin is what those pushes arrive at.
 
-    So far it owns device identity -- who is allowed to push at all -- and
-    configuration: which folders on which machine hold which station's
+    So far it owns device identity -- who is allowed to push at all --
+    configuration (which folders on which machine hold which station's
     files, read by the agent from ``sync`` and written back, in the part
     that is the machine's to decide, through the station link config
-    endpoint.
+    endpoint), and the file ledger: what each machine has been asked for,
+    what has arrived, and where those bytes are staged.
 
-    The staging store and the ``get_station_data`` drain that turns pushed
-    files into observations arrive in later slices; until then the plugin
-    registers so that its API and admin are installed, and ingestion yields
-    nothing.
+    The ``get_station_data`` drain that turns staged files into observations
+    arrives in a later slice; until then the plugin registers so that its API
+    and admin are installed, files are received and remembered, and ingestion
+    yields nothing.
     """
 
     type = "adl_agent_plugin"

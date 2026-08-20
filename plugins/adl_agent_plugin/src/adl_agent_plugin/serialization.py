@@ -12,7 +12,8 @@ The wire form of a station link's own tier is built by the model
 beside the field's definition. This module assembles the rest.
 """
 
-from .models import AgentConnection, AgentStationLink
+from .limits import MANIFEST_PAGE_LIMIT, MAX_UPLOAD_BYTES
+from .models import AgentConnection, AgentStationDataFile, AgentStationLink
 
 
 def device_summary(device):
@@ -38,14 +39,16 @@ def device_payload(device):
     }
 
 
-def station_link_payload(station_link):
+def station_link_payload(station_link, reoffer_point=None):
     station = station_link.station
 
     return {
         "id": station_link.pk,
         # How far back this station is worth offering files from. A floor,
-        # not a high-water mark -- see get_manifest_watermark.
-        "watermark": station_link.get_manifest_watermark(),
+        # never a high-water mark -- see manifest_watermark. What the ledger
+        # contributes to it is read for the whole device at once, so a
+        # machine with forty stations is still one query.
+        "watermark": station_link.manifest_watermark(reoffer_point),
         "config": station_link.app_config(),
         "admin": {
             "enabled": station_link.enabled,
@@ -61,7 +64,7 @@ def station_link_payload(station_link):
     }
 
 
-def connection_payload(connection, station_links):
+def connection_payload(connection, station_links, reoffer_points):
     return {
         "id": connection.pk,
         "name": connection.name,
@@ -69,7 +72,22 @@ def connection_payload(connection, station_links):
             "enabled": connection.plugin_processing_enabled,
             "network": connection.network.name,
         },
-        "station_links": [station_link_payload(link) for link in station_links],
+        "station_links": [
+            station_link_payload(link, reoffer_points.get(link.pk))
+            for link in station_links
+        ],
+    }
+
+
+def limits_payload():
+    """What an agent may send in one go.
+
+    Handed out rather than assumed so that a fleet already installed in the
+    field follows a change to these numbers without being reinstalled.
+    """
+    return {
+        "manifest_entries": MANIFEST_PAGE_LIMIT,
+        "file_bytes": MAX_UPLOAD_BYTES,
     }
 
 
@@ -89,12 +107,18 @@ def sync_payload(device):
     )
 
     links = _station_links_by_connection(connections)
+    reoffer_points = AgentStationDataFile.reoffer_points_for_connections(
+        connections
+    )
 
     return {
         "config_version": device.current_config_version(),
+        "limits": limits_payload(),
         "device": device_payload(device),
         "connections": [
-            connection_payload(connection, links.get(connection.pk, []))
+            connection_payload(
+                connection, links.get(connection.pk, []), reoffer_points
+            )
             for connection in connections
         ],
     }
@@ -131,3 +155,45 @@ def _station_links_by_connection(connections):
         grouped.setdefault(station_link.network_connection_id, []).append(station_link)
 
     return grouped
+
+
+def manifest_payload(device, diff):
+    """The answer to a manifest: send these, and here is what I ignored.
+
+    ``requested`` echoes the hash each file was offered under, so the agent
+    can match the answer to the candidate it proposed rather than re-reading
+    the file to work out which version this is.
+
+    The two lists of station link ids are not errors -- a machine works from
+    a cached configuration, so it will sometimes offer files for a link that
+    has been deleted, moved to another device, or switched off centrally.
+    Saying which is the difference between a technician seeing "ADL is
+    ignoring Garissa" and seeing nothing at all.
+    """
+    return {
+        "config_version": device.current_config_version(),
+        "limits": limits_payload(),
+        "requested": [
+            {
+                "station_link_id": entry.station_link_id,
+                "name": entry.name,
+                "hash": entry.content_hash,
+            }
+            for entry in diff.requested
+        ],
+        "unknown_station_links": diff.unknown,
+        "disabled_station_links": diff.disabled,
+    }
+
+
+def upload_payload(data_file, device):
+    """The answer to an upload: what ADL now holds under that name."""
+    return {
+        "station_link_id": data_file.station_link_id,
+        "name": data_file.file_name,
+        "size": data_file.size,
+        "hash": data_file.content_hash,
+        "status": data_file.status,
+        "received_at": data_file.received_at,
+        "config_version": device.current_config_version(),
+    }
