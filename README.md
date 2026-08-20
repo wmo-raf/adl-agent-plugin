@@ -84,6 +84,12 @@ curl http://localhost:8080/plugins/api/agent/v1/me/ -H "Authorization: Bearer $T
 ## Tests
 
 ```bash
+make test    # with the stack already up
+```
+
+Or, without needing the app container running:
+
+```bash
 docker compose run --rm --entrypoint adl adl test --keepdb adl_agent_plugin.tests
 ```
 
