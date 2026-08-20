@@ -64,6 +64,22 @@ def clear_nudge_latch(connection):
 
 
 @contextmanager
+def at_time(moment):
+    """Run the block as if ADL's clock read ``moment``.
+
+    The one thing an HTTP-seam test cannot arrange by calling the API: a
+    heartbeat that arrived a quarter of an hour ago. The request is still a
+    real request through the real endpoint -- only the wall clock it lands on
+    is moved -- so a test of liveness is still driven by heartbeats posted and
+    withheld, not by states written by hand.
+    """
+    from unittest.mock import patch
+
+    with patch("django.utils.timezone.now", return_value=moment):
+        yield
+
+
+@contextmanager
 def tasks_run_immediately():
     """Run enqueued Celery tasks in-process, the way a worker would.
 

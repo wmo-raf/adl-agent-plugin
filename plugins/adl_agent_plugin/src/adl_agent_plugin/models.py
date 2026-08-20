@@ -26,7 +26,9 @@ from .credentials import (
     hash_device_token,
     normalize_pairing_code,
 )
-from .panels import AgentDeviceIdentityPanel
+from .health import LivenessState, liveness_of, source_check_result
+from .heartbeat import MAX_OS_VERSION_LENGTH, MAX_VERSION_LENGTH
+from .panels import AgentDeviceIdentityPanel, AgentDeviceLivenessPanel
 from .validators import validate_start_date
 
 
@@ -163,6 +165,80 @@ class AgentDevice(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Created at"))
     updated_at = models.DateTimeField(auto_now=True, verbose_name=_("Updated at"))
 
+    # ---------- the heartbeat snapshot ----------
+    #
+    # The latest report and nothing else. There is deliberately no heartbeat
+    # history table (decision #264): a fleet of a hundred machines reporting
+    # every five minutes would write ten million rows a year to answer a
+    # question nobody asks, while the questions that *are* asked -- what is
+    # this machine doing now, and when did it change -- are answered by this
+    # snapshot and by the transitions log below.
+    #
+    # Typed columns for what the fleet listing and the health ladder read;
+    # one JSON column for the rest.
+
+    #: The agent's own version, recorded from the header it sends on every
+    #: call -- not only on heartbeats -- so that an incompatible fleet is
+    #: visible from the first request a machine makes (story 31).
+    agent_version = models.CharField(
+        max_length=MAX_VERSION_LENGTH, blank=True, default="", editable=False,
+        verbose_name=_("Agent version"),
+    )
+    os_version = models.CharField(
+        max_length=MAX_OS_VERSION_LENGTH, blank=True, default="",
+        editable=False, verbose_name=_("Operating system"),
+    )
+    last_heartbeat_at = models.DateTimeField(
+        null=True, blank=True, editable=False,
+        verbose_name=_("Last heartbeat at"),
+    )
+    #: The machine's clock minus ADL's, signed: positive means it is ahead.
+    #: First-class rather than buried in the JSON because the file-picking
+    #: window runs on the device's own file times, so a skewed clock is a
+    #: quiet data-loss risk and an operator has to be able to sort on it.
+    clock_skew_seconds = models.IntegerField(
+        null=True, blank=True, editable=False,
+        verbose_name=_("Clock skew (seconds)"),
+    )
+    #: When the machine last finished a scan cycle. What tells "the service
+    #: is dead" apart from "the service is alive and its work is wedged".
+    last_cycle_completed_at = models.DateTimeField(
+        null=True, blank=True, editable=False,
+        verbose_name=_("Last cycle completed at"),
+    )
+    #: Uptime, backlog, per-station cycle counts and free disk -- everything
+    #: an operator reads on the device's page and nothing the ladder sorts on.
+    heartbeat_details = models.JSONField(
+        default=dict, blank=True, editable=False,
+        verbose_name=_("Heartbeat details"),
+    )
+
+    #: What ADL currently believes about this machine, and since when. The
+    #: computed answer is always available from the snapshot above; this is
+    #: the *last recorded* one, and it exists so that a change can be told
+    #: from a repetition -- see :meth:`record_liveness`.
+    liveness_state = models.CharField(
+        max_length=20, choices=LivenessState.CHOICES,
+        default=LivenessState.UNKNOWN, editable=False,
+        verbose_name=_("Liveness"),
+    )
+    liveness_since = models.DateTimeField(
+        null=True, blank=True, editable=False, verbose_name=_("Liveness since"),
+    )
+
+    #: Hold this machine back from an update. Enforced by the update feed
+    #: (story 29); it lives here, beside the version the machine reports,
+    #: because the two are read together -- an operator pins after seeing a
+    #: version, and checks the pin took by watching the version stop moving.
+    pinned_version = models.CharField(
+        max_length=MAX_VERSION_LENGTH, blank=True, default="",
+        verbose_name=_("Pinned version"),
+        help_text=_(
+            "Hold this machine on one agent version instead of letting it "
+            "follow the update feed. Leave empty to keep it current."
+        ),
+    )
+
     objects = AgentDeviceQuerySet.as_manager()
 
     panels = [
@@ -170,8 +246,10 @@ class AgentDevice(models.Model):
             FieldPanel("name"),
             FieldPanel("description"),
             FieldPanel("check_interval_minutes"),
+            FieldPanel("pinned_version"),
         ], heading=_("Device")),
         AgentDeviceIdentityPanel(heading=_("Identity")),
+        AgentDeviceLivenessPanel(heading=_("Liveness")),
     ]
 
     class Meta:
@@ -221,6 +299,11 @@ class AgentDevice(models.Model):
     @property
     def status_tone(self):
         return self.STATUS_TONES[self.status]
+
+    # Named for the listing, where it sits beside the liveness state: this
+    # one is about the credential, that one is about the machine, and two
+    # columns both headed "status" would be two columns nobody can read.
+    status_label.fget.short_description = _("Pairing")
 
     # ``request.user`` is set to the device on agent endpoints, so it has to
     # answer the two questions Django asks of any user-shaped object. This is
@@ -285,6 +368,12 @@ class AgentDevice(models.Model):
         self.pairing_code_expires_at = None
         self.save(update_fields=["revoked_at", "token_hash", "pairing_code",
                                  "pairing_code_expires_at", "updated_at"])
+
+        # A revoked machine drops out of the fleet sweep, so this is the last
+        # chance to record what happened to it: without this its transitions
+        # log would end at whatever it was doing when it was cut off, and
+        # read as if it were still doing it.
+        self.record_liveness()
 
     @classmethod
     @transaction.atomic
@@ -387,16 +476,178 @@ class AgentDevice(models.Model):
         """Record that something in this device's configuration changed."""
         self.bump_config_version_for(self.pk)
 
-    def touch_last_seen(self):
-        """Record that this device just called in.
+    def touch_last_seen(self, agent_version=None):
+        """Record that this device just called in, and what it is running.
 
         A single targeted UPDATE, not a model save: this runs on every
         authenticated request and must not race with whatever else is
         writing the row.
+
+        The version rides along because it travels on every call, not only on
+        heartbeats (decision #266) -- so an instance learns what a machine is
+        running from the machine's first request, before any heartbeat has
+        been due, and a fleet too old for the current server is visible at
+        once (story 31). Written only when it has changed, so the ordinary
+        call still costs one narrow UPDATE of one column.
         """
         now = dj_timezone.now()
-        AgentDevice.objects.filter(pk=self.pk).update(last_seen_at=now)
-        self.last_seen_at = now
+        changes = {"last_seen_at": now}
+
+        version = (agent_version or "").strip()[:MAX_VERSION_LENGTH]
+        if version and version != self.agent_version:
+            changes["agent_version"] = version
+
+        AgentDevice.objects.filter(pk=self.pk).update(**changes)
+
+        for field_name, value in changes.items():
+            setattr(self, field_name, value)
+
+    # ---------- liveness ----------
+
+    @property
+    def liveness(self):
+        """What this machine's heartbeats say about it right now.
+
+        Computed from the snapshot on the row rather than read from
+        ``liveness_state``, so what an operator sees is never a minute behind
+        what the machine last said. The stored column is the *last recorded*
+        state, which is a different question -- see :meth:`record_liveness`.
+        """
+        return liveness_of(self)
+
+    @property
+    def liveness_label(self):
+        return self.liveness.label
+
+    @property
+    def clock_skew_display(self):
+        """The skew as a column, signed, or a dash when none is known."""
+        skew = self.clock_skew_seconds
+
+        if skew is None:
+            return "—"
+
+        return "%+d s" % skew
+
+    liveness_label.fget.short_description = _("Status")
+    clock_skew_display.fget.short_description = _("Clock skew")
+
+    def record_heartbeat(self, beat, now=None):
+        """Take one heartbeat, and return what ADL now believes.
+
+        The whole write is here rather than in the view because the skew is
+        computed, not reported: the machine sends the time it thinks it is,
+        and the difference against ADL's own clock is the finding. A device
+        that omits its clock leaves the previous skew alone rather than
+        clearing it -- the last thing ADL measured is still the last thing it
+        measured.
+        """
+        now = now or dj_timezone.now()
+
+        changes = {
+            "last_heartbeat_at": now,
+            "last_seen_at": now,
+            "os_version": beat.os_version or self.os_version,
+            "heartbeat_details": beat.details(),
+        }
+
+        if beat.app_version:
+            changes["agent_version"] = beat.app_version
+
+        if beat.device_time is not None:
+            changes["clock_skew_seconds"] = int(
+                (beat.device_time - now).total_seconds()
+            )
+
+        if beat.last_cycle_completed_at is not None:
+            changes["last_cycle_completed_at"] = beat.last_cycle_completed_at
+
+        AgentDevice.objects.filter(pk=self.pk).update(**changes)
+
+        for field_name, value in changes.items():
+            setattr(self, field_name, value)
+
+        return self.record_liveness(now)
+
+    @transaction.atomic
+    def record_liveness(self, now=None):
+        """Work out this machine's state and log it if it has changed.
+
+        Only change is persisted -- the pattern core's
+        ``NetworkConnectionHealth`` uses. A machine that has been offline all
+        weekend has one row saying so, not one every minute, so a transitions
+        listing reads as a history rather than as a log file, and flapping
+        shows up as what it is: many rows in a short time.
+
+        Locked, because two writers can reach this at once -- the heartbeat
+        that has just arrived and the fleet sweep -- and without the lock
+        both would see the old state and both would append the same row.
+        """
+        now = now or dj_timezone.now()
+
+        locked = AgentDevice.objects.select_for_update().filter(pk=self.pk).first()
+
+        if locked is None:  # pragma: no cover - deleted mid-request
+            return liveness_of(self, now)
+
+        liveness = liveness_of(locked, now)
+
+        if liveness.state != locked.liveness_state:
+            AgentDeviceStateTransition.objects.create(
+                device=self, at=now,
+                from_state=locked.liveness_state or "",
+                to_state=liveness.state,
+            )
+            AgentDevice.objects.filter(pk=self.pk).update(
+                liveness_state=liveness.state, liveness_since=now,
+            )
+            self.liveness_state = liveness.state
+            self.liveness_since = now
+
+        return liveness
+
+
+class AgentDeviceStateTransition(models.Model):
+    """Append-only record of each change in what ADL believes about a machine.
+
+    The counterpart of there being no heartbeat history: a report that says
+    the same thing as the last one is not worth a row, and a report that says
+    something different is worth a permanent one. So this is where "it went
+    offline at 02:14 on Sunday and came back at 09:40 on Monday" is answered
+    -- and where flapping is visible as a run of rows hours apart rather than
+    as a gap somebody has to notice.
+
+    Rows are dropped after ninety days by the nightly sweep, the same period
+    core keeps its own connection-health transitions for.
+    """
+
+    RETENTION_DAYS = 90
+
+    device = models.ForeignKey(
+        AgentDevice, on_delete=models.CASCADE,
+        related_name="state_transitions", verbose_name=_("Agent Device"),
+    )
+    at = models.DateTimeField(verbose_name=_("At"))
+    # Blank rather than null for the first row of a device's life: it came
+    # from nowhere, and "" says that without a reader having to handle None.
+    from_state = models.CharField(
+        max_length=20, blank=True, default="",
+        choices=LivenessState.CHOICES, verbose_name=_("From"),
+    )
+    to_state = models.CharField(
+        max_length=20, choices=LivenessState.CHOICES, verbose_name=_("To"),
+    )
+
+    class Meta:
+        verbose_name = _("Agent Device State Transition")
+        verbose_name_plural = _("Agent Device State Transitions")
+        ordering = ["-at", "-pk"]
+        indexes = [
+            models.Index(fields=["device", "at"], name="agent_dev_trans_at_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.device} - {self.from_state or '-'} -> {self.to_state} at {self.at}"
 
 
 class ReadOnlyConfigFields(Exception):
@@ -446,13 +697,21 @@ class AgentConnection(NetworkConnection):
 
     station_link_model_string_label = "adl_agent_plugin.AgentStationLink"
 
-    #: The agent inverts ADL's usual direction of travel: there is no host to
-    #: dial and no credential to present outbound, because the country server
-    #: pushes to us. Declaring that keeps layers 4 and 5 of the ingestion
-    #: diagnostic reporting NOT_APPLICABLE instead of inventing a verdict
-    #: about a network call ADL never makes. Agent liveness is reported
-    #: separately, from heartbeats.
-    has_external_source = False
+    #: There *is* a source outside ADL here -- a machine in a country, with
+    #: an operating system, a disk and a service on it -- so layer 5 has a
+    #: subject and this connection claims one.
+    has_external_source = True
+
+    #: But ADL never reaches for it. The traffic runs the other way, which
+    #: is the whole reason this plugin exists, and the declaration is what
+    #: keeps core honest about it: layer 4 reports NOT_APPLICABLE rather
+    #: than inventing a network path, and -- the part that matters -- a
+    #: completed ingestion run here is never read as evidence about the
+    #: source. Such a run swept a staging store; it dialled nothing,
+    #: authenticated to nothing, and letting it speak for layer 5 would let
+    #: a local pass over files that arrived hours ago overrule a machine
+    #: that has since gone dark.
+    dials_source = False
 
     device = models.ForeignKey(
         AgentDevice,
@@ -545,6 +804,24 @@ class AgentConnection(NetworkConnection):
         duck-type a connection through this method.
         """
         return ftp_decoder_registry.get(self.decoder)
+
+    def check_source(self):
+        """Is the machine that feeds this connection alive and cycling?
+
+        Layer 5 of the ingestion diagnostic, answered the only way an
+        inverted connection can answer it: from the heartbeats the machine
+        sends, not from a call ADL makes. That makes this the one source
+        check in the fleet that performs no I/O -- it reads columns already
+        on the device row -- so core's fifteen-second probe budget is never
+        anywhere near spent, and pressing *Probe source* on a country whose
+        link is down still answers instantly.
+
+        The verdict itself, and the sentence that carries it, are built in
+        :mod:`adl_agent_plugin.health` so that the device page, the fleet
+        listing and this check cannot come to differ about what a machine's
+        silence means.
+        """
+        return source_check_result(self)
 
     def clean(self):
         """Refuse a decoder that has not been given what it needs.

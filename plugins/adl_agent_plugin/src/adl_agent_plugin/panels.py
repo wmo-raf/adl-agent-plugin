@@ -40,3 +40,42 @@ class AgentDeviceIdentityPanel(Panel):
             })
 
             return context
+
+
+class AgentDeviceLivenessPanel(Panel):
+    """What the machine last said about itself, on its own page.
+
+    The fleet listing answers "which machines are in trouble"; this answers
+    the next question, which is "what is wrong with this one". So it shows
+    the reading behind the state -- when the last heartbeat and the last
+    completed cycle were, what the machine is running, how skewed its clock
+    is, what its disks have left -- and the per-station scan counts, which
+    are the difference between "this country is quiet" and "this country is
+    fine except for Garissa".
+
+    Read-only by construction: nothing here is ADL's to set. It is what a
+    machine reported, or the absence of a machine having reported.
+    """
+
+    class BoundPanel(Panel.BoundPanel):
+        template_name = "adl_agent_plugin/panels/device_liveness.html"
+
+        def is_shown(self):
+            return self.instance is not None and self.instance.pk is not None
+
+        def get_context_data(self, parent_context=None):
+            context = super().get_context_data(parent_context)
+            from .heartbeat import read_details
+
+            device = self.instance
+
+            context.update({
+                "device": device,
+                "liveness": device.liveness,
+                **read_details(device.heartbeat_details),
+                # Newest first and bounded: the whole history is a listing's
+                # job, and an edit form is not a listing.
+                "transitions": device.state_transitions.all()[:10],
+            })
+
+            return context

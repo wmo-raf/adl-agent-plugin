@@ -6,6 +6,12 @@ from .models import AgentDevice
 
 AUTH_KEYWORD = "Bearer"
 
+#: The agent's own version, sent on every call rather than only on heartbeats
+#: (decision #266), so that an instance knows what each machine is running
+#: from its very first request and an incompatible fleet can be warned or
+#: refused server-side (story 31). In WSGI's spelling of a request header.
+AGENT_VERSION_HEADER = "HTTP_X_AGENT_VERSION"
+
 
 class AgentDeviceAuthentication(BaseAuthentication):
     """Authenticate an ``Authorization: Bearer <device token>`` header.
@@ -18,7 +24,9 @@ class AgentDeviceAuthentication(BaseAuthentication):
     credential there at all.
 
     On success ``request.user`` and ``request.auth`` are both the
-    :class:`~adl_agent_plugin.models.AgentDevice`.
+    :class:`~adl_agent_plugin.models.AgentDevice`, and the call has recorded
+    that the device was seen and what version it is running -- the passive
+    half of fleet liveness, beside the heartbeat's active half.
     """
 
     keyword = AUTH_KEYWORD
@@ -59,7 +67,9 @@ class AgentDeviceAuthentication(BaseAuthentication):
                 _("Invalid or revoked device token.")
             )
 
-        device.touch_last_seen()
+        device.touch_last_seen(
+            agent_version=request.META.get(AGENT_VERSION_HEADER)
+        )
 
         return device, device
 
