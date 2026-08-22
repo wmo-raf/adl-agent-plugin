@@ -42,9 +42,10 @@ that turns received files into observations again — re-reading the bytes where
 has them, and asking the machine for them where it does not.
 
 **Updates.** An update feed served by this instance, because the machines it serves cannot
-reach anything else. Releases are held here — mirrored nightly from one canonical index, or
-uploaded in the admin — and offered to agents with the digest they must hash to. A per-device
-version pin holds one machine back, and is enforced here rather than trusted to the agent.
+reach anything else. Releases are held here — uploaded in the admin, or mirrored nightly
+from one canonical index where an instance has opted into that — and offered to agents with
+the digest they must hash to. A per-device version pin holds one machine back, and is
+enforced here rather than trusted to the agent.
 
 **Fleet health.** Every machine heartbeats on its own cadence, so *offline*, *cycle stuck*
 and *clock skewed* are distinct visible states rather than one shrug at "no data". The
@@ -500,10 +501,19 @@ adl-agent CI  ──►  agent-releases.json  (github.com/wmo-raf/adl-agent, lat
    agents ───────────────-┴──────────────────┘
 ```
 
-`run_agent_release_mirror` runs at 01:20, reads the index, and pulls anything new. Every
-package is verified against the digest the index states *before* it is stored, so a mirror
-that fetched half a file ends as a logged failure rather than as a release a fleet
-installs.
+**Mirroring is opt-in.** It gives this instance a standing nightly outbound dependency on a
+host outside the country running it, which is not something an instance should acquire
+because somebody upgraded a plugin. Switch it on when your IT department is happy with it:
+
+```bash
+ADL_AGENT_RELEASE_MIRROR_ENABLED=true
+```
+
+`run_agent_release_mirror` is scheduled at 01:20 either way, so turning it on is one
+environment variable rather than a deployment change. When it runs it reads the index and
+pulls anything new. Every package is verified against the digest the index states *before*
+it is stored, so a mirror that fetched half a file ends as a logged failure rather than as
+a release a fleet installs.
 
 What arrives is **staged, not published**. WMO decides which versions exist; each country
 decides when its own machines take one — a decision worth keeping locally for a service in
@@ -512,13 +522,14 @@ the middle of a season. Publishing is a tick box on the release in the admin.
 | Setting                             | Default                                     | What it is for                                        |
 |-------------------------------------|---------------------------------------------|-------------------------------------------------------|
 | `ADL_AGENT_RELEASE_INDEX_URL`       | the `adl-agent` project's latest release     | Point an instance at another release host             |
-| `ADL_AGENT_RELEASE_MIRROR_ENABLED`  | `true`                                       | Switch mirroring off where egress is locked down      |
+| `ADL_AGENT_RELEASE_MIRROR_ENABLED`  | `false`                                      | Switch mirroring on; off until an instance asks       |
 | `ADL_AGENT_RELEASE_MIRROR_LIMIT`    | `3`                                          | How many of the index's releases to consider          |
 | `ADL_AGENT_RELEASE_MAX_BYTES`       | `300 MB`                                     | What a single package may weigh                       |
 
-An instance with no egress at all switches the mirror off and uploads releases by hand —
-the same rows, the same feed, and an agent cannot tell the difference. That route is also
-how a build is tried on one country before it goes everywhere.
+An instance that never switches it on misses nothing: an operator uploads the package in
+the admin instead — the same rows, the same feed, and an agent cannot tell the difference.
+That route is also how a build is tried on one country before it goes everywhere, and the
+only route for an instance with no egress at all.
 
 ### Configuration, and who owns which half
 

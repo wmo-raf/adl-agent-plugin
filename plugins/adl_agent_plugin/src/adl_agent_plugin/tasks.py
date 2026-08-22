@@ -195,6 +195,12 @@ def run_agent_release_mirror(self):
     release within reach of the country's machines, and an operator decides
     when they take it (see ``mirror``).
 
+    Does nothing unless this instance has switched mirroring on: it is
+    opt-in, because it is a standing outbound dependency on a host outside
+    the country running the instance. It stays scheduled either way, so
+    turning it on is one environment variable rather than a deployment
+    change.
+
     A singleton because it downloads tens of megabytes; two of them would
     fetch the same release twice and race to store it.
     """

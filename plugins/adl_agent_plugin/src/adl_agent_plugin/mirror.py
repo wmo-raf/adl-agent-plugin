@@ -24,6 +24,8 @@ an operator testing a build before it goes everywhere, an air-gapped install
 -- all of them upload in the admin, and produce exactly the same rows. The
 feed cannot tell the difference and neither can an agent.
 
+**And it is off until an instance asks for it.** See :func:`mirror_enabled`.
+
 The index is a JSON document the agent's build publishes::
 
     {"releases": [
@@ -92,7 +94,22 @@ KNOWN_KINDS = {kind.value for kind in AgentReleaseArtifactKind}
 
 
 def mirror_enabled():
-    return getattr(settings, "ADL_AGENT_RELEASE_MIRROR_ENABLED", True)
+    """Whether this instance fetches releases from upstream at all.
+
+    Off unless an instance says otherwise, which is the opposite of what is
+    convenient and the right way round for what this is. Mirroring gives an
+    ADL instance a standing outbound dependency on a host outside the country
+    running it, and an instance acquiring one because somebody upgraded a
+    plugin is not a decision its IT department was party to -- particularly
+    in a product whose whole premise is machines that reach nothing but their
+    own ADL.
+
+    Turning it on is one environment variable, and the README says which. An
+    instance that never does still gets every release: an operator uploads
+    the package in the admin, which produces the same rows and the same feed,
+    and no agent can tell the difference.
+    """
+    return getattr(settings, "ADL_AGENT_RELEASE_MIRROR_ENABLED", False)
 
 
 def index_url():

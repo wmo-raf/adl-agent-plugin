@@ -16,14 +16,18 @@ def setup(settings):
     # Where this instance mirrors agent releases from, and whether it does.
     #
     # Both are environment-configurable because they are deployment
-    # decisions, not code ones: an instance behind a locked-down egress
-    # policy turns the mirror off and its operator uploads releases in the
-    # admin instead, and an organisation running its own release host points
-    # the index somewhere else. Empty means "the default in ``mirror``",
-    # which is where the agent's own build publishes.
+    # decisions, not code ones: an organisation running its own release host
+    # points the index somewhere else, and an instance behind a locked-down
+    # egress policy leaves the mirror alone and uploads releases in the admin
+    # instead. Empty means "the default in ``mirror``", which is where the
+    # agent's own build publishes.
     settings.ADL_AGENT_RELEASE_INDEX_URL = os.getenv(
         "ADL_AGENT_RELEASE_INDEX_URL", "",
     )
+
+    # Opt-in, deliberately. Mirroring gives this instance a standing nightly
+    # outbound dependency on a host outside the country running it, and an
+    # instance should not acquire one because somebody upgraded a plugin.
     settings.ADL_AGENT_RELEASE_MIRROR_ENABLED = os.getenv(
-        "ADL_AGENT_RELEASE_MIRROR_ENABLED", "true",
-    ).strip().lower() not in ("0", "false", "no", "off")
+        "ADL_AGENT_RELEASE_MIRROR_ENABLED", "false",
+    ).strip().lower() in ("1", "true", "yes", "on")

@@ -33,7 +33,16 @@ from .helpers import (
 )
 
 
+@override_settings(ADL_AGENT_RELEASE_MIRROR_ENABLED=True)
 class MirrorTestCase(TemporaryMediaRoot, TestCase):
+    """An instance that has switched mirroring on.
+
+    Stated once, here, because it is stated once in a deployment too: every
+    test below is about what a mirroring instance does, and the one test
+    about an instance that has not asked for it is deliberately outside this
+    class.
+    """
+
     def setUp(self):
         self.upstream = UpstreamReleaseHost()
         self.addCleanup(self.upstream.close)
@@ -213,7 +222,7 @@ class MirrorFailureTests(MirrorTestCase):
         self.assertEqual(self.mirror()["mirrored"], [])
 
     @override_settings(ADL_AGENT_RELEASE_MIRROR_ENABLED=False)
-    def test_an_instance_can_switch_mirroring_off_entirely(self):
+    def test_an_instance_can_switch_mirroring_off_again(self):
         self.upstream.publish("0.2.0")
 
         self.assertEqual(self.mirror()["mirrored"], [])
@@ -239,3 +248,27 @@ class MirroredReleaseReachesTheFleetTests(MirrorTestCase):
 
         self.assertEqual(body["version"], "0.2.0")
         self.assertEqual(body["artifact"]["sha256"], sha256_of(b"MSI BYTES"))
+
+
+class MirrorIsOptInTests(TemporaryMediaRoot, TestCase):
+    """An instance that has not asked to mirror, which is every instance.
+
+    Deliberately outside :class:`MirrorTestCase`, which switches mirroring
+    on: what is under test here is the default, and a test that inherited an
+    override could not see it.
+    """
+
+    def test_an_instance_that_has_not_asked_reaches_nobody(self):
+        upstream = UpstreamReleaseHost()
+        self.addCleanup(upstream.close)
+
+        upstream.publish("0.2.0")
+
+        result = mirror_releases(url=upstream.index_url)
+
+        # Not one request. Mirroring is a standing outbound dependency on a
+        # host outside the country running this instance, and upgrading a
+        # plugin is not how an instance should acquire one.
+        self.assertEqual(upstream.hits, [])
+        self.assertEqual(result["mirrored"], [])
+        self.assertFalse(AgentRelease.objects.exists())
