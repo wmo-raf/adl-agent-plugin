@@ -3,7 +3,10 @@
 import gzip
 import hashlib
 import itertools
+import json
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from contextlib import contextmanager
 from datetime import timedelta
 
@@ -21,6 +24,9 @@ from adl_agent_plugin.models import (
     AgentConnection,
     AgentConnectionVariableMapping,
     AgentDevice,
+    AgentRelease,
+    AgentReleaseArtifact,
+    AgentReleaseArtifactKind,
     AgentStationDataFile,
     AgentStationLink,
     AgentStationLinkVariableMapping,
@@ -33,6 +39,12 @@ ME_URL = reverse("plugins:adl_agent:device_me")
 SYNC_URL = reverse("plugins:adl_agent:sync")
 MANIFEST_URL = reverse("plugins:adl_agent:manifest")
 FILES_URL = reverse("plugins:adl_agent:files")
+UPDATE_URL = reverse("plugins:adl_agent:update")
+
+
+def update_package_url(version, kind):
+    """The package endpoint, addressed the way an agent addresses it."""
+    return reverse("plugins:adl_agent:update_package", args=[version, kind])
 
 
 def station_link_config_url(station_link):
@@ -376,3 +388,125 @@ class TemporaryMediaRoot:
         super().tearDownClass()
         cls._media_override.disable()
         cls._media_dir.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Releases and the upstream they are mirrored from
+# ---------------------------------------------------------------------------
+
+def create_release(version, packages=None, published=True, **kwargs):
+    """A release this instance holds, with a package per tier asked for.
+
+    ``packages`` maps an artifact kind to its bytes; the default is a
+    service-tier package, because that is the tier almost every test is about.
+    """
+    release = AgentRelease.objects.create(
+        version=version, is_published=published, **kwargs,
+    )
+
+    for kind, content in (packages or {AgentReleaseArtifactKind.MSI: b"MSI BYTES"}).items():
+        artifact = AgentReleaseArtifact(release=release, kind=kind)
+        artifact.file.save(f"AdlAgent-{version}-{kind}.pkg", ContentFile(content), save=False)
+        artifact.save()
+
+    return release
+
+
+class UpstreamReleaseHost:
+    """The canonical release host, small enough to keep in a test.
+
+    Real HTTP on a loopback port rather than a patched ``requests``: what the
+    mirror has to get right is mostly protocol and bytes -- an index that is
+    not JSON, a package that arrives short, a digest that does not match what
+    the index promised -- and every one of those is exactly what patching the
+    call would paper over.
+    """
+
+    def __init__(self):
+        self.releases = []
+        self.packages = {}
+        self.index_body = None
+        self.hits = []
+
+        host = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - http.server's spelling
+                host.hits.append(self.path)
+
+                if self.path == "/index.json":
+                    body = host.index_document()
+                    self._send(200, "application/json", body)
+                    return
+
+                package = host.packages.get(self.path)
+
+                if package is None:
+                    self._send(404, "text/plain", b"no such package")
+                    return
+
+                self._send(200, "application/octet-stream", package)
+
+            def _send(self, status, content_type, body):
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def base_url(self):
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    @property
+    def index_url(self):
+        return f"{self.base_url}/index.json"
+
+    def publish(self, version, packages=None, states_sha256=None, **entry):
+        """Put a release on the upstream index.
+
+        ``states_sha256`` maps a kind to the digest the index will *claim*,
+        which is how a test becomes an upstream serving a package that is not
+        what it says it is.
+        """
+        packages = packages or {"msi": b"MSI BYTES " + version.encode()}
+        artifacts = []
+
+        for kind, content in packages.items():
+            path = f"/{version}/{kind}.pkg"
+            self.packages[path] = content
+
+            artifacts.append({
+                "kind": kind,
+                "url": f"{self.base_url}{path}",
+                "sha256": (states_sha256 or {}).get(kind, sha256_of(content)),
+                "size": len(content),
+            })
+
+        self.releases.append({
+            "version": version,
+            "released_at": entry.pop("released_at", "2026-08-21T10:00:00Z"),
+            "notes": entry.pop("notes", f"Agent {version}"),
+            "artifacts": artifacts,
+            **entry,
+        })
+
+    def index_document(self):
+        """The bytes the index URL answers with."""
+        if self.index_body is not None:
+            return self.index_body
+
+        return json.dumps({"releases": self.releases}).encode()
+
+    def close(self):
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)

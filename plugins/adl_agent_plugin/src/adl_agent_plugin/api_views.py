@@ -2,9 +2,11 @@ import tempfile
 
 from django.core.exceptions import ValidationError
 from django.core.files import File
+from django.http import FileResponse
 from django.utils.translation import gettext as _
 from rest_framework import status
 from rest_framework.parsers import JSONParser, MultiPartParser
+from rest_framework.renderers import BaseRenderer, JSONRenderer
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -28,10 +30,12 @@ from .serialization import (
     heartbeat_payload,
     manifest_payload,
     sync_payload,
+    update_payload,
     upload_payload,
 )
 from .tasks import nudge
 from .throttling import AgentPairThrottle
+from .updates import AGENT_TIERS, DEFAULT_TIER, artifact_offered_to, offer_for
 
 
 def error(code, detail, status_code=status.HTTP_400_BAD_REQUEST, **extra):
@@ -321,4 +325,93 @@ class AgentFileUploadView(AgentAPIView):
         return Response(
             upload_payload(data_file, self.device),
             status=status.HTTP_201_CREATED,
+        )
+
+
+class AgentUpdateView(AgentAPIView):
+    """``GET api/agent/v1/update`` -- what this machine should be running.
+
+    The feed a country's fleet updates from, served by the country's own ADL
+    because that is the only host its machines can reach (story 28). Asked on
+    every scan cycle, so the answer has to be cheap: one release row and its
+    packages.
+
+    The pin is applied here rather than trusted to the agent (story 29). A
+    pinned machine is not told that a newer release exists at all, which is
+    what makes the pin a property of the fleet rather than a promise made by
+    every version of every agent that will ever run in it.
+    """
+
+    def get(self, request):
+        tier = request.query_params.get("tier") or DEFAULT_TIER
+
+        if tier not in AGENT_TIERS:
+            return error(
+                "invalid_tier",
+                _("No such install tier: '%(tier)s'.") % {"tier": tier},
+            )
+
+        return Response(
+            update_payload(offer_for(self.device, tier)),
+            status=status.HTTP_200_OK,
+        )
+
+
+class PackageRenderer(BaseRenderer):
+    """Lets a caller ask for the bytes it is about to be sent.
+
+    Never actually renders anything: the package endpoint returns a
+    ``FileResponse`` streamed from storage rather than a DRF ``Response``.
+    It exists so content negotiation, which runs before the view does,
+    recognises the media type an agent is asking for.
+    """
+
+    media_type = "application/octet-stream"
+    format = "bin"
+    charset = None
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
+
+class AgentUpdatePackageView(AgentAPIView):
+    """``GET api/agent/v1/update/<version>/<kind>`` -- the package itself.
+
+    Streamed from this instance's storage rather than redirected to it: an
+    agent that had to follow a redirect somewhere else would need a route to
+    somewhere else, and on these machines there is none.
+
+    Only the release the caller is being offered is served. That is the same
+    pin the feed applies, enforced a second time on the only URL that could
+    otherwise get around it.
+    """
+
+    # What this endpoint answers with is a file, and DRF decides before the
+    # view runs whether it has a renderer for what the caller asked for. A
+    # client stating `Accept: application/octet-stream` -- which is what
+    # anyone downloading a package would state, and what curl is told to in
+    # the README -- would otherwise be refused with a 406 by an endpoint that
+    # serves nothing else. JSON stays first, because the refusals below are
+    # JSON and `*/*` has to keep reaching them.
+    renderer_classes = [JSONRenderer, PackageRenderer]
+
+    def get(self, request, version, kind):
+        artifact = artifact_offered_to(self.device, version, kind)
+
+        if artifact is None or not artifact.file:
+            # Deliberately the same answer for "no such release", "not
+            # published" and "not the one you are pinned to". A device has no
+            # business mapping out what an instance holds.
+            return error(
+                "not_offered",
+                _("This device is not being offered a %(kind)s package for "
+                  "version %(version)s.") % {"kind": kind, "version": version},
+                status.HTTP_404_NOT_FOUND,
+            )
+
+        return FileResponse(
+            artifact.file.open("rb"),
+            as_attachment=True,
+            filename=artifact.file_name,
+            content_type="application/octet-stream",
         )

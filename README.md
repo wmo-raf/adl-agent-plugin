@@ -41,6 +41,12 @@ schedule while the ledger row that remembers the file lives on, and a re-process
 that turns received files into observations again — re-reading the bytes where ADL still
 has them, and asking the machine for them where it does not.
 
+**Updates.** An update feed served by this instance, because the machines it serves cannot
+reach anything else. Releases are held here — uploaded in the admin, or mirrored nightly
+from one canonical index where an instance has opted into that — and offered to agents with
+the digest they must hash to. A per-device version pin holds one machine back, and is
+enforced here rather than trusted to the agent.
+
 **Fleet health.** Every machine heartbeats on its own cadence, so *offline*, *cycle stuck*
 and *clock skewed* are distinct visible states rather than one shrug at "no data". The
 verdict feeds ADL's existing connection-health checklist as the source layer, and the
@@ -72,6 +78,8 @@ The versioned surface is `api/agent/v1/`, mounted by ADL under `plugins/`:
 | `POST  /plugins/api/agent/v1/manifest/`                          | device token | Offers candidate files, answers with the ones to send |
 | `POST  /plugins/api/agent/v1/files/`                             | device token | Takes one file, verified against its manifest entry |
 | `PATCH /plugins/api/agent/v1/station-links/<id>/config/`         | device token | Writes the app's tier of one station link's config  |
+| `GET   /plugins/api/agent/v1/update/`                            | device token | What this machine should be running, and where to get it |
+| `GET   /plugins/api/agent/v1/update/<version>/<kind>/`           | device token | The package itself, if this machine is being offered it |
 
 `pair` is the only endpoint that answers without a credential, and the only one that is
 rate-limited (30 attempts per client IP per hour by default; set
@@ -437,6 +445,92 @@ Per-cycle ingestion detail is not duplicated here — it lands in the ordinary
 agent-specific: the agent surfaces states through core health and inherits whatever
 alerting core has or grows.
 
+### Updating a fleet that cannot reach the internet
+
+An agent's machine has one network path: outbound HTTPS to its own ADL. So the update feed
+is served here, by the instance it already talks to (story 28).
+
+```bash
+GET /plugins/api/agent/v1/update/?tier=service
+# -> 200 {"version": "0.2.0", "pinned": false, "reason": "",
+#         "artifact": {"kind": "msi", "path": "update/0.2.0/msi/",
+#                      "file_name": "AdlAgent-0.2.0-x64.msi",
+#                      "sha256": "9f2c…", "size": 43210987}}
+```
+
+Three things about that answer are deliberate.
+
+**The path is relative.** It is resolved against the agent API's own base and the agent
+refuses anything absolute. What is being described is an executable that will replace a
+service running as LocalSystem on a national meteorological service's server, and which
+host it comes from is not a question the body of a response gets to answer.
+
+**The digest is stated.** Pilots ship unsigned (decision #262), so the agent hashing the
+package it downloaded against this line is the whole of what stands between a corrupted or
+tampered download and that service binary. A mismatch is deleted, not installed, and not
+fetched again until this instance offers something else.
+
+**The tier is asked, not configured.** `service` gets the MSI, `user` the Velopack package.
+An install knows how it was installed and nothing else on the machine reliably does, so the
+agent states it and ADL picks the package.
+
+#### The pin
+
+A device with a **pinned version** is offered that version and nothing else — no newer
+release is mentioned to it, and the package endpoint refuses one even if the URL is
+constructed by hand. Clear the pin and the machine follows the fleet again on its next
+cycle.
+
+The agent only ever moves forwards: a pin *below* what a machine is already running holds
+it where it is rather than rolling it back. Windows Installer refuses a downgrade anyway,
+and a fleet that could be walked backwards from a text field is a worse thing to own than
+one that has to be uninstalled by hand.
+
+#### Where releases come from
+
+ADL is one deployment per country. Left to itself, publishing a version would mean an
+operator in each of twenty-six NMHSs uploading the same file. So the **instances** mirror
+from one canonical index while the **agents** still talk to nothing but their own instance:
+
+```
+adl-agent CI  ──►  agent-releases.json  (github.com/wmo-raf/adl-agent, latest release)
+                          │   ADL instances pull nightly — they have egress; their machines do not
+        ┌─────────────────┼─────────────────┐
+   ADL Kenya         ADL Ethiopia       ADL Guinea
+        │                 │                  │
+   agents ───────────────-┴──────────────────┘
+```
+
+**Mirroring is opt-in.** It gives this instance a standing nightly outbound dependency on a
+host outside the country running it, which is not something an instance should acquire
+because somebody upgraded a plugin. Switch it on when your IT department is happy with it:
+
+```bash
+ADL_AGENT_RELEASE_MIRROR_ENABLED=true
+```
+
+`run_agent_release_mirror` is scheduled at 01:20 either way, so turning it on is one
+environment variable rather than a deployment change. When it runs it reads the index and
+pulls anything new. Every package is verified against the digest the index states *before*
+it is stored, so a mirror that fetched half a file ends as a logged failure rather than as
+a release a fleet installs.
+
+What arrives is **staged, not published**. WMO decides which versions exist; each country
+decides when its own machines take one — a decision worth keeping locally for a service in
+the middle of a season. Publishing is a tick box on the release in the admin.
+
+| Setting                             | Default                                     | What it is for                                        |
+|-------------------------------------|---------------------------------------------|-------------------------------------------------------|
+| `ADL_AGENT_RELEASE_INDEX_URL`       | the `adl-agent` project's latest release     | Point an instance at another release host             |
+| `ADL_AGENT_RELEASE_MIRROR_ENABLED`  | `false`                                      | Switch mirroring on; off until an instance asks       |
+| `ADL_AGENT_RELEASE_MIRROR_LIMIT`    | `3`                                          | How many of the index's releases to consider          |
+| `ADL_AGENT_RELEASE_MAX_BYTES`       | `300 MB`                                     | What a single package may weigh                       |
+
+An instance that never switches it on misses nothing: an operator uploads the package in
+the admin instead — the same rows, the same feed, and an agent cannot tell the difference.
+That route is also how a build is tried on one country before it goes everywhere, and the
+only route for an instance with no egress at all.
+
 ### Configuration, and who owns which half
 
 ADL stores every durable setting; the app is an editor writing through the API, holding
@@ -495,6 +589,15 @@ under Connections. A connection names the machine that sends its files, the deco
 reads them (and its CSV configuration, where the decoder needs one), how long its staged
 bytes are kept, and the variable mappings for the vendor's file columns; a station link binds one ADL station to one folder
 on that machine, and may override a mapping the connection got wrong for it.
+
+**Agent Releases** in the main menu — what this instance can offer its fleet. A release
+holds one package per install tier; **Published** is what decides whether any machine is
+offered it, and a release mirrored from upstream arrives unpublished. Pasting the digest a
+build published into **Expected SHA-256** makes the upload refuse itself unless the bytes
+match, which is the one moment a truncated file can still be caught by a person.
+
+The pin lives on the device, not here: **Pinned version** on an Agent Device holds that one
+machine on a version while the rest of the fleet moves.
 
 **Agent Station Data Files** under Snippets is the file-by-file record: what arrived, what
 became of it, why anything failed, and whether its bytes are still here. Ticking rows and
@@ -589,8 +692,12 @@ nudge
 that makes an upload become observations without waiting for the clock, retention (what the
 sweep drops, what it must never touch, and that a pruned file is neither offered nor drained
 again), both re-process routes end to end (a mapping fixed after the fact reaching a file
-already received; a pruned file asked for, re-uploaded and processed), the admin pages, and
-the credential and variable-mapping rules on their own.
+already received; a pruned file asked for, re-uploaded and processed), the update feed (what
+is offered, what a pin holds back on both the feed and the package endpoint, and what a
+release with only one tier's package does), the mirror — against a real upstream on a
+loopback port, so an index that is not JSON, a package that does not match its stated digest
+and a release whose second package is corrupt are all things that actually happen to it —
+the admin pages, and the credential and variable-mapping rules on their own.
 
 ## Getting started
 

@@ -52,6 +52,7 @@ from .fleet import (
     publish_source_evidence,
     sweep_liveness,
 )
+from .mirror import mirror_releases
 from .retention import prune_expired_files
 
 logger = logging.getLogger(__name__)
@@ -183,6 +184,40 @@ def run_agent_file_retention(self):
     logger.info("[AGENT RETENTION] Pruned the bytes of %s staged file(s)", pruned)
 
 
+@app.task(base=Singleton, bind=True)
+def run_agent_release_mirror(self):
+    """Pull any new agent release from upstream into this instance.
+
+    ADL is one deployment per country and an agent can only update from the
+    instance it is paired with, so without this every NMHS would upload the
+    same build by hand -- and a fleet would be current only where somebody
+    had time. What arrives is staged, never published: this brings the
+    release within reach of the country's machines, and an operator decides
+    when they take it (see ``mirror``).
+
+    Does nothing unless this instance has switched mirroring on: it is
+    opt-in, because it is a standing outbound dependency on a host outside
+    the country running the instance. It stays scheduled either way, so
+    turning it on is one environment variable rather than a deployment
+    change.
+
+    A singleton because it downloads tens of megabytes; two of them would
+    fetch the same release twice and race to store it.
+    """
+    result = mirror_releases()
+
+    if result["mirrored"]:
+        logger.info(
+            "[AGENT RELEASES] Mirrored %s; publish in the admin when this "
+            "fleet should move", ", ".join(result["mirrored"]),
+        )
+
+    if result["failed"]:
+        logger.warning(
+            "[AGENT RELEASES] Could not mirror %s", ", ".join(result["failed"]),
+        )
+
+
 @app.on_after_finalize.connect
 def setup_periodic_tasks(sender, **kwargs):
     # An hour after midnight rather than on it: core and the FTP plugin both
@@ -201,6 +236,16 @@ def setup_periodic_tasks(sender, **kwargs):
         crontab(hour=1, minute=10),
         run_agent_fleet_retention.s(),
         name="run-agent-fleet-retention-daily",
+    )
+
+    # Daily, in the same quiet window as the other two. A release is
+    # published rarely and installed on the fleet's own cadence, so checking
+    # more often would buy hours at most -- and an instance that pulls a
+    # hundred megabytes from upstream should do it while nobody is working.
+    sender.add_periodic_task(
+        crontab(hour=1, minute=20),
+        run_agent_release_mirror.s(),
+        name="run-agent-release-mirror-daily",
     )
 
     sender.add_periodic_task(
