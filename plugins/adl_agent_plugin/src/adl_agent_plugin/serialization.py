@@ -231,3 +231,30 @@ def upload_payload(data_file, device):
         "received_at": data_file.received_at,
         "config_version": device.current_config_version(),
     }
+
+
+def update_payload(offer):
+    """What ADL says this machine should be running (story 28).
+
+    The artifact's location is a path relative to the agent API's own base,
+    never an absolute URL. What is being described is an executable that will
+    replace a service running as LocalSystem on a national meteorological
+    service's server, and "which host does it come from" is not a question
+    the body of a response gets to answer -- not even this one, which travels
+    through whatever reverse proxy a country's IT department has put in front
+    of ADL.
+    """
+    artifact = offer.artifact
+
+    return {
+        "version": offer.version,
+        "pinned": offer.pinned,
+        "reason": offer.reason,
+        "artifact": None if artifact is None else {
+            "kind": artifact.kind,
+            "path": f"update/{offer.version}/{artifact.kind}/",
+            "file_name": artifact.file_name,
+            "sha256": artifact.sha256,
+            "size": artifact.size,
+        },
+    }

@@ -1,3 +1,4 @@
+import hashlib
 from datetime import timedelta
 
 from adl.core.models import DataParameter, NetworkConnection, StationLink, Unit
@@ -6,13 +7,14 @@ from adl_ftp_plugin.decoder_resolution import decoder_requires_config
 from adl_ftp_plugin.registries import ftp_decoder_registry
 from adl_ftp_plugin.utils import get_ftp_decoder_choices
 from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator
+from django.core.validators import MinValueValidator, RegexValidator
 from django.db import models, transaction
 from django.db.models import F
 from django.db.models.signals import post_delete, post_save
 from django.utils import timezone as dj_timezone
 from django.utils.translation import gettext_lazy as _
 from modelcluster.fields import ParentalKey
+from modelcluster.models import ClusterableModel
 from timezone_field import TimeZoneField
 from wagtail.admin.panels import FieldPanel, InlinePanel, MultiFieldPanel
 from wagtail.models import Orderable
@@ -39,6 +41,20 @@ from .validators import validate_start_date
 #: disk is bounded by what a country sends in three months rather than by how
 #: long it has been running.
 DEFAULT_FILE_RETENTION_DAYS = 90
+
+
+#: Three numbers, and nothing else. The agent compares versions by parsing
+#: exactly this shape, and Windows Installer only compares the first three
+#: fields of a product version -- a scheme with a fourth would produce
+#: upgrades Windows silently declines to perform.
+AGENT_RELEASE_VERSION_PATTERN = r"^\d+\.\d+\.\d+$"
+
+validate_agent_release_version = RegexValidator(
+    AGENT_RELEASE_VERSION_PATTERN,
+    message=_(
+        "An agent version is three numbers separated by dots, such as 1.2.0."
+    ),
+)
 
 
 class AgentDeviceQuerySet(models.QuerySet):
@@ -232,6 +248,11 @@ class AgentDevice(models.Model):
     #: version, and checks the pin took by watching the version stop moving.
     pinned_version = models.CharField(
         max_length=MAX_VERSION_LENGTH, blank=True, default="",
+        # Validated, because a pin is matched against a release version
+        # exactly: "v0.1.0" or "0.1" matches nothing this instance will ever
+        # hold, and the machine would sit frozen at whatever it was running
+        # while the admin showed a pin that looked deliberate.
+        validators=[validate_agent_release_version],
         verbose_name=_("Pinned version"),
         help_text=_(
             "Hold this machine on one agent version instead of letting it "
@@ -1824,6 +1845,339 @@ class AgentStationLinkVariableMapping(Orderable):
     def source_parameter_unit(self):
         """The unit the file states this variable in."""
         return self.file_variable_unit
+
+
+# ---------------------------------------------------------------------------
+# The update feed
+#
+# The agent's machines cannot reach the internet -- that is the premise of
+# the whole product -- so the only place a fleet can be updated from is the
+# ADL instance it already talks to (story 28). These two models are what that
+# instance holds: a release, and the packages it consists of.
+#
+# Where the bytes came from is deliberately not the feed's business. An
+# operator uploading a build in the admin and the nightly mirror pulling one
+# from upstream produce the same rows, and an agent cannot tell which it is
+# being served. See ``mirror`` for the second route and why an instance with
+# no egress still needs the first.
+# ---------------------------------------------------------------------------
+
+def agent_release_file_path(instance, filename):
+    """Where a release's package goes on the default storage."""
+    return f"agent_releases/{instance.release.version}/{filename}"
+
+
+#: Where anything that is not three numbers sorts: below every real version.
+#: The safe direction -- a row that should not be there cannot become the
+#: release a whole fleet installs.
+NOT_A_VERSION = (-1, -1, -1)
+
+
+def agent_release_sort_key(version):
+    """``"0.10.2"`` as ``(0, 10, 2)``, so that 10 sorts above 9."""
+    parts = (version or "").split(".")
+
+    if len(parts) != 3:
+        return NOT_A_VERSION
+
+    try:
+        return tuple(int(part) for part in parts)
+    except ValueError:
+        return NOT_A_VERSION
+
+
+def is_agent_release_version(version):
+    """True when ``version`` is three numbers the agent can compare."""
+    return agent_release_sort_key(version) != NOT_A_VERSION
+
+
+class AgentReleaseSource(models.TextChoices):
+    UPLOADED = "uploaded", _("Uploaded here")
+    MIRRORED = "mirrored", _("Mirrored from upstream")
+
+
+class AgentReleaseArtifactKind(models.TextChoices):
+    """The packages a release can consist of.
+
+    Two install tiers, so two upgrade packages (decision #262): an MSI for
+    machines whose technician has administrator rights, and a Velopack
+    release for those without. The third is not an upgrade at all -- it is
+    the installer a technician downloads once, hosted here for the same
+    reason as everything else: so that a country server needs nothing but its
+    own ADL.
+    """
+
+    MSI = "msi", _("Windows Installer package — service tier upgrade")
+    VELOPACK_FULL = "velopack_full", _("Velopack release — per-user tier upgrade")
+    VELOPACK_SETUP = "velopack_setup", _("Velopack installer — per-user first install")
+
+
+#: Which package each install tier is served. The tier travels with the
+#: agent's question because an install knows how it was installed and nothing
+#: else on the machine reliably does.
+AGENT_TIER_ARTIFACTS = {
+    "service": AgentReleaseArtifactKind.MSI,
+    "user": AgentReleaseArtifactKind.VELOPACK_FULL,
+}
+
+
+class AgentRelease(ClusterableModel):
+    """One version of the ADL Agent, as this instance holds it.
+
+    Published releases are what the feed offers; unpublished ones are held
+    where an operator can see them and decide. That distinction is the whole
+    of the governance story for a mirrored fleet: WMO's release reaching this
+    instance is not the same event as this country's machines installing it,
+    and an NMHS that wants to look first can.
+
+    Ordering is by version number rather than by when a row was written, so a
+    release mirrored out of order -- or an operator uploading an old build to
+    pin a machine to -- cannot become "latest" by accident.
+    """
+
+    wagtail_reference_index_ignore = True
+
+    version = models.CharField(
+        max_length=32,
+        unique=True,
+        validators=[validate_agent_release_version],
+        verbose_name=_("Version"),
+        help_text=_("Three numbers, as the agent reports itself: 1.2.0."),
+    )
+    notes = models.TextField(
+        blank=True,
+        verbose_name=_("Release notes"),
+        help_text=_("What changed. Shown here only; agents never read it."),
+    )
+    is_published = models.BooleanField(
+        default=False,
+        verbose_name=_("Published"),
+        help_text=_(
+            "Until this is ticked, no machine is offered this release. A "
+            "release mirrored from upstream arrives unpublished so that this "
+            "instance decides when its own fleet moves."
+        ),
+    )
+    released_at = models.DateTimeField(
+        null=True, blank=True,
+        verbose_name=_("Released at"),
+        help_text=_("When this version was built. Upstream's date, when mirrored."),
+    )
+    source = models.CharField(
+        max_length=20,
+        choices=AgentReleaseSource.choices,
+        default=AgentReleaseSource.UPLOADED,
+        editable=False,
+        verbose_name=_("Source"),
+    )
+    upstream_url = models.URLField(
+        blank=True, default="", editable=False,
+        verbose_name=_("Upstream URL"),
+        help_text=_("Where this release was mirrored from, if it was."),
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Created at"))
+    updated_at = models.DateTimeField(auto_now=True, verbose_name=_("Updated at"))
+
+    panels = [
+        MultiFieldPanel([
+            FieldPanel("version"),
+            FieldPanel("released_at"),
+            FieldPanel("is_published"),
+            FieldPanel("notes"),
+        ], heading=_("Release")),
+        InlinePanel("artifacts", label=_("Packages")),
+    ]
+
+    class Meta:
+        verbose_name = _("Agent Release")
+        verbose_name_plural = _("Agent Releases")
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.version
+
+    @property
+    def sort_key(self):
+        return agent_release_sort_key(self.version)
+
+    @property
+    def published_label(self):
+        return _("Published") if self.is_published else _("Staged")
+
+    published_label.fget.short_description = _("State")
+
+    def artifact_for(self, kind):
+        """The package of that kind, or ``None`` if this release has none."""
+        return self.artifacts.filter(kind=kind).first()
+
+    def artifact_for_tier(self, tier):
+        """The package an install of ``tier`` upgrades with, or ``None``."""
+        kind = AGENT_TIER_ARTIFACTS.get(tier)
+
+        return None if kind is None else self.artifact_for(kind)
+
+    @classmethod
+    def published(cls):
+        return cls.objects.filter(is_published=True).prefetch_related("artifacts")
+
+    @classmethod
+    def latest_published(cls):
+        """The highest published version, by version number.
+
+        Ordered in Python rather than in the database: releases are counted
+        in dozens over a product's life, and the alternative is a sort column
+        to keep in step with the version string it is derived from.
+        """
+        return max(cls.published(), key=lambda release: release.sort_key, default=None)
+
+
+class AgentReleaseArtifact(models.Model):
+    """One installable package belonging to a release.
+
+    The hash is computed here, from the bytes as stored, because that is what
+    an agent will hash on the other end -- a hash copied from elsewhere would
+    verify the wrong thing. What can be pasted in is
+    :attr:`expected_sha256`: the digest the build published. Given one, this
+    row refuses to save unless the two agree, which is the only moment a
+    truncated upload or a tampered mirror can still be caught by a person.
+    """
+
+    wagtail_reference_index_ignore = True
+
+    release = ParentalKey(
+        AgentRelease, on_delete=models.CASCADE, related_name="artifacts",
+        verbose_name=_("Release"),
+    )
+    kind = models.CharField(
+        max_length=32,
+        choices=AgentReleaseArtifactKind.choices,
+        verbose_name=_("Kind"),
+    )
+    file = models.FileField(
+        upload_to=agent_release_file_path,
+        verbose_name=_("File"),
+        help_text=_("The package itself. Served to agents from this instance."),
+    )
+    sha256 = models.CharField(
+        max_length=64, blank=True, default="", editable=False,
+        verbose_name=_("SHA-256"),
+        help_text=_("Computed from the stored bytes. What an agent checks against."),
+    )
+    size = models.PositiveBigIntegerField(
+        null=True, blank=True, editable=False, verbose_name=_("Size (bytes)"),
+    )
+    expected_sha256 = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        verbose_name=_("Expected SHA-256"),
+        help_text=_(
+            "Optional. Paste the digest the build published and this package "
+            "will be refused unless the uploaded bytes match it."
+        ),
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Created at"))
+
+    panels = [
+        FieldPanel("kind"),
+        FieldPanel("file"),
+        FieldPanel("expected_sha256"),
+    ]
+
+    class Meta:
+        verbose_name = _("Agent Release Package")
+        verbose_name_plural = _("Agent Release Packages")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["release", "kind"], name="unique_agent_release_artifact_kind",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.release.version} {self.get_kind_display()}"
+
+    @property
+    def file_name(self):
+        """What this package is called, without the storage path above it."""
+        return self.file.name.rsplit("/", 1)[-1] if self.file else ""
+
+    def clean(self):
+        """Hash the bytes, and refuse them if they are not what was promised.
+
+        Reading the file here is deliberate and is not the I/O this plugin's
+        other models avoid in ``clean()``: there is no diagnostic re-running
+        ``full_clean`` over stored release rows, and the only way to know
+        whether an uploaded package is the package is to read it.
+        """
+        super().clean()
+
+        if not self.file:
+            raise ValidationError({"file": _("Upload the package file.")})
+
+        digest, size = self._digest()
+
+        expected = (self.expected_sha256 or "").strip().lower()
+
+        if expected and expected != digest:
+            raise ValidationError({
+                "expected_sha256": _(
+                    "These bytes hash to %(actual)s, not %(expected)s. The "
+                    "upload is not the package that digest describes."
+                ) % {"actual": digest, "expected": expected},
+            })
+
+        self.expected_sha256 = expected
+        self.sha256 = digest
+        self.size = size
+
+    def save(self, *args, **kwargs):
+        # A row created in code -- the mirror, a test -- has not been through
+        # a form, so the hash is computed here too.
+        #
+        # And computed again for one that has, which is not waste: validation
+        # hashed the bytes as they were uploaded, and this hashes them as
+        # they were stored. The second is the one an agent will download, so
+        # it is the one the feed must state.
+        if self.file:
+            self.sha256, self.size = self._digest()
+
+        super().save(*args, **kwargs)
+
+    def _digest(self):
+        """``(sha256, size)`` of the file, read in chunks.
+
+        Chunked because these are tens of megabytes and an ADL instance is
+        often a modest VM; reading a release into memory to hash it would be
+        the largest single allocation this plugin ever made.
+
+        A file that arrived open is left open. This runs during validation as
+        well as during save, and on the admin's upload path the two are the
+        same handle: closing it here means the save that follows reads a
+        closed file, and publishing a release fails with "I/O operation on
+        closed file" -- which is to say the demo this whole feature exists
+        for ("publish v2 to the feed") does not work.
+        """
+        digest = hashlib.sha256()
+        size = 0
+
+        opened_here = self.file.closed
+
+        if opened_here:
+            self.file.open("rb")
+
+        try:
+            for chunk in self.file.chunks():
+                digest.update(chunk)
+                size += len(chunk)
+        finally:
+            if opened_here:
+                self.file.close()
+            else:
+                # Back to the start for whoever handed it over: storage is
+                # about to read the same handle.
+                self.file.seek(0)
+
+        return digest.hexdigest(), size
 
 
 # ---------------------------------------------------------------------------
