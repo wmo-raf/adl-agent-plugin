@@ -10,10 +10,17 @@ than reaching for the models the view happens to read.
 
 from datetime import timedelta
 
-from django.test import TestCase
+from django.db import connections
+from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone as dj_timezone
 
-from adl_agent_plugin.models import AgentListingStrategy, AgentStationLink
+from adl_agent_plugin.health import DEFAULT_STATION_STALE_AFTER_MINUTES
+from adl_agent_plugin.models import (
+    AgentFileStatus,
+    AgentListingStrategy,
+    AgentStationLink,
+)
 
 from .helpers import (
     SYNC_URL,
@@ -23,6 +30,7 @@ from .helpers import (
     create_station,
     create_station_link,
     paired_device,
+    stage_file,
     wire_datetime,
 )
 
@@ -244,3 +252,155 @@ class SyncConfigVersionTests(SyncTestCase):
         create_station_link(create_connection(create_device()))
 
         self.assertEqual(self.sync().json()["config_version"], before)
+
+
+class SyncLastReceivedTests(SyncTestCase):
+    """What the machine's own station list colours its rows from.
+
+    ADL's record rather than the agent's, which is the whole point: the agent
+    keeps no history of what it delivered, so after a restart its own memory
+    of a station is empty while this number is not.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.connection = create_connection(self.device, name="Vendor A")
+        self.link = create_station_link(self.connection)
+
+    def link_payload(self, index=0):
+        return self.sync().json()["connections"][0]["station_links"][index]
+
+    def received(self, moment, name="GAR_01.dat", link=None):
+        """A file ADL holds, received at a moment of this test's choosing."""
+        staged = stage_file(link or self.link, name, b"payload")
+        type(staged).objects.filter(pk=staged.pk).update(received_at=moment)
+        return staged
+
+    def test_a_station_nothing_has_ever_arrived_for_says_so(self):
+        # Not an error and not an omission: it is a station that has not
+        # started yet, and the app draws it differently from one that stopped.
+        self.assertIsNone(self.link_payload()["last_received_at"])
+
+    def test_a_link_carries_when_anything_last_arrived_for_it(self):
+        moment = dj_timezone.now() - timedelta(hours=2)
+
+        self.received(moment)
+
+        self.assertEqual(
+            self.link_payload()["last_received_at"], wire_datetime(moment)
+        )
+
+    def test_the_newest_arrival_wins_however_the_files_are_ordered(self):
+        newest = dj_timezone.now() - timedelta(minutes=10)
+
+        self.received(dj_timezone.now() - timedelta(days=2), name="old.dat")
+        self.received(newest, name="new.dat")
+        self.received(dj_timezone.now() - timedelta(days=1), name="middle.dat")
+
+        self.assertEqual(
+            self.link_payload()["last_received_at"], wire_datetime(newest)
+        )
+
+    def test_a_file_that_failed_to_decode_still_counts_as_arrived(self):
+        # Delivery is what this number is about. A decode failure is fixed in
+        # the ADL admin by an administrator, and painting the machine's row
+        # for it would hand the technician standing at it a fault they cannot
+        # act on.
+        moment = dj_timezone.now() - timedelta(minutes=5)
+        staged = self.received(moment)
+        type(staged).objects.filter(pk=staged.pk).update(
+            status=AgentFileStatus.FAILED, last_error="no such column",
+        )
+
+        self.assertEqual(
+            self.link_payload()["last_received_at"], wire_datetime(moment)
+        )
+
+    def test_the_query_count_does_not_grow_with_the_stations(self):
+        """The promise the grouped query exists to keep.
+
+        A machine with two vendors and forty stations syncs on every cycle,
+        and the moment this becomes a query per link it becomes a query per
+        link for every machine in the fleet. Compared against itself rather
+        than asserted at a number, so an unrelated query added elsewhere in
+        ``sync`` does not fail this test for the wrong reason.
+        """
+        self.received(dj_timezone.now())
+        with_one = self.queries_to_sync()
+
+        for index in range(4):
+            link = create_station_link(
+                self.connection,
+                create_station(self.connection.network, name=f"Station {index}"),
+            )
+            self.received(dj_timezone.now(), name=f"f{index}.dat", link=link)
+
+        self.assertEqual(self.queries_to_sync(), with_one)
+
+    def queries_to_sync(self):
+        """How many queries one sync takes as things stand."""
+        with CaptureQueriesContext(connections["default"]) as captured:
+            self.sync()
+
+        return len(captured)
+
+    def test_one_stations_files_never_speak_for_another(self):
+        quiet = create_station_link(
+            self.connection, create_station(self.connection.network, name="Wajir")
+        )
+
+        self.received(dj_timezone.now())
+
+        payloads = {
+            link["id"]: link["last_received_at"]
+            for link in self.sync().json()["connections"][0]["station_links"]
+        }
+
+        self.assertIsNotNone(payloads[self.link.pk])
+        self.assertIsNone(payloads[quiet.pk])
+
+
+class SyncQuietWindowTests(SyncTestCase):
+    """How long a vendor's stations may say nothing before the app marks them.
+
+    Resolved to a number here rather than sent as a blank for the machine to
+    fill in, so a deployment that changes its default is followed by every
+    machine on the next cycle instead of only by freshly installed ones.
+    """
+
+    def admin_tier(self):
+        return self.sync().json()["connections"][0]["admin"]
+
+    def test_a_connection_that_states_nothing_gets_this_instances_number(self):
+        create_connection(self.device)
+
+        self.assertEqual(
+            self.admin_tier()["stale_after_minutes"],
+            DEFAULT_STATION_STALE_AFTER_MINUTES,
+        )
+
+    def test_a_vendor_that_writes_slowly_can_raise_it(self):
+        create_connection(self.device, stale_after_minutes=1500)
+
+        self.assertEqual(self.admin_tier()["stale_after_minutes"], 1500)
+
+    @override_settings(ADL_AGENT_STATION_STALE_AFTER_MINUTES=90)
+    def test_a_deployment_can_move_the_default_for_its_whole_fleet(self):
+        create_connection(self.device)
+
+        self.assertEqual(self.admin_tier()["stale_after_minutes"], 90)
+
+    @override_settings(ADL_AGENT_STATION_STALE_AFTER_MINUTES=90)
+    def test_a_connections_own_number_outranks_the_deployments(self):
+        create_connection(self.device, stale_after_minutes=1500)
+
+        self.assertEqual(self.admin_tier()["stale_after_minutes"], 1500)
+
+    def test_changing_the_window_reaches_the_machine_as_a_new_version(self):
+        connection = create_connection(self.device)
+        before = self.sync().json()["config_version"]
+
+        connection.stale_after_minutes = 720
+        connection.save()
+
+        self.assertGreater(self.sync().json()["config_version"], before)

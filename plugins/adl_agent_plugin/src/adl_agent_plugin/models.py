@@ -793,12 +793,38 @@ class AgentConnection(NetworkConnection):
         ),
     )
 
+    #: How long this vendor's stations may go without ADL receiving a file
+    #: before the agent's own window calls them quiet. Left empty they use
+    #: the deployment's number (see ``health.station_stale_after_minutes``),
+    #: so nothing has to be filled in for the machine to judge its stations.
+    #:
+    #: It is here and not on the station link because a cadence is a property
+    #: of the vendor's software, not of the station it happens to be writing
+    #: for: a device serving two vendors and forty stations has two cadences,
+    #: not forty. And it is admin tier like everything else on this model --
+    #: the machine reads it to colour its own list and can never write it.
+    stale_after_minutes = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1)],
+        verbose_name=_("Quiet After (minutes)"),
+        help_text=_(
+            "How long one of this vendor's stations may send nothing before "
+            "the agent's station list marks it quiet. Raise it for a vendor "
+            "that writes one file a day; leave it empty to use this "
+            "instance's default."
+        ),
+    )
+
     panels = NetworkConnection.panels + [
         FieldPanel("device"),
         MultiFieldPanel([
             FieldPanel("decoder"),
             FieldPanel("csv_config"),
         ], heading=_("Decoding")),
+        MultiFieldPanel([
+            FieldPanel("stale_after_minutes"),
+        ], heading=_("Quiet Stations")),
         MultiFieldPanel([
             FieldPanel("file_retention_days"),
         ], heading=_("Staged Files")),
@@ -1463,6 +1489,12 @@ class AgentStationDataFile(models.Model):
             # The watermark's: how far has this station's ledger got?
             models.Index(fields=["station_link", "mtime"],
                          name="idx_agentfile_link_mtime"),
+            # The station list's: when did anything last arrive for this
+            # station? Asked for every link on a device on every sync, which
+            # is every cycle, so it is grouped and indexed rather than
+            # scanned.
+            models.Index(fields=["station_link", "received_at"],
+                         name="idx_agentfile_link_received"),
         ]
 
     def __str__(self):
@@ -1776,6 +1808,38 @@ class AgentStationDataFile(models.Model):
             .values("station_link_id")
             .annotate(point=models.Min("mtime"))
             .values_list("station_link_id", "point")
+        )
+
+    @classmethod
+    def last_received_for_connections(cls, connections):
+        """When anything last arrived for each link: ``{link id: moment}``.
+
+        What the agent's station list colours its rows from, and the reason
+        it can: this is ADL's own record of what it holds, so it survives the
+        machine being restarted, reinstalled, or crashing mid-cycle -- none of
+        which the agent's in-memory cycle report does.
+
+        Deliberately every file, whatever ADL then made of it. A file that
+        failed to decode still proves the folder, the pattern, the share and
+        the upload all worked, and the fault is a variable mapping or a CSV
+        config -- fixed in this admin, by an administrator, and not by anyone
+        standing at the vendor's server. Judging the machine on it would hand
+        that technician a red mark they cannot act on.
+
+        Grouped in one query for the whole device, for the same reason
+        :meth:`reoffer_points_for_connections` is: a machine with two vendors
+        and forty stations is one sync call. Links nothing has ever arrived
+        for are absent, which the caller reads as never.
+        """
+        if not connections:
+            return {}
+
+        return dict(
+            cls.objects
+            .filter(station_link__network_connection__in=connections)
+            .values("station_link_id")
+            .annotate(last=models.Max("received_at"))
+            .values_list("station_link_id", "last")
         )
 
     @classmethod

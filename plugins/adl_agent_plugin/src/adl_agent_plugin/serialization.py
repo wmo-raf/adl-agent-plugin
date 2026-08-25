@@ -14,7 +14,7 @@ beside the field's definition. This module assembles the rest.
 
 from django.utils import timezone as dj_timezone
 
-from .health import heartbeat_interval_minutes
+from .health import heartbeat_interval_minutes, station_stale_after_minutes
 from .limits import MANIFEST_PAGE_LIMIT, MAX_UPLOAD_BYTES
 from .models import AgentConnection, AgentStationDataFile, AgentStationLink
 
@@ -50,7 +50,7 @@ def device_payload(device):
     }
 
 
-def station_link_payload(station_link, reoffer_point=None):
+def station_link_payload(station_link, reoffer_point=None, last_received_at=None):
     station = station_link.station
 
     return {
@@ -60,6 +60,15 @@ def station_link_payload(station_link, reoffer_point=None):
         # contributes to it is read for the whole device at once, so a
         # machine with forty stations is still one query.
         "watermark": station_link.manifest_watermark(reoffer_point),
+        # When ADL last received anything for this station, so the machine's
+        # own list can say whether data is actually arriving. Beside the
+        # watermark rather than under "admin", because it is neither the
+        # machine's tier nor a setting anybody chose: it is a fact ADL
+        # derived, and the agent may only read it.
+        #
+        # None means nothing has ever arrived, which the agent shows as a
+        # station that has not started rather than one that has stopped.
+        "last_received_at": last_received_at,
         "config": station_link.app_config(),
         "admin": {
             "enabled": station_link.enabled,
@@ -75,16 +84,25 @@ def station_link_payload(station_link, reoffer_point=None):
     }
 
 
-def connection_payload(connection, station_links, reoffer_points):
+def connection_payload(connection, station_links, reoffer_points, last_received):
     return {
         "id": connection.pk,
         "name": connection.name,
         "admin": {
             "enabled": connection.plugin_processing_enabled,
             "network": connection.network.name,
+            # Resolved here rather than sent as a null for the agent to fill
+            # in: the fallback is ADL's number, and a machine that had to
+            # know the default would be a machine that goes on using an old
+            # one after a deployment changes it.
+            "stale_after_minutes": (
+                connection.stale_after_minutes or station_stale_after_minutes()
+            ),
         },
         "station_links": [
-            station_link_payload(link, reoffer_points.get(link.pk))
+            station_link_payload(
+                link, reoffer_points.get(link.pk), last_received.get(link.pk)
+            )
             for link in station_links
         ],
     }
@@ -121,6 +139,9 @@ def sync_payload(device):
     reoffer_points = AgentStationDataFile.reoffer_points_for_connections(
         connections
     )
+    last_received = AgentStationDataFile.last_received_for_connections(
+        connections
+    )
 
     return {
         "config_version": device.current_config_version(),
@@ -128,7 +149,8 @@ def sync_payload(device):
         "device": device_payload(device),
         "connections": [
             connection_payload(
-                connection, links.get(connection.pk, []), reoffer_points
+                connection, links.get(connection.pk, []), reoffer_points,
+                last_received,
             )
             for connection in connections
         ],
