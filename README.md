@@ -569,6 +569,33 @@ Station links and connections that an administrator has disabled are still sent,
 rather than omitted, so the technician at the machine can see that a station is switched
 off centrally instead of watching it disappear.
 
+#### Telling a station that stopped from one that never started
+
+A station can be configured perfectly, report no error, and send nothing for days: the
+logger died, the share unmounted, the vendor changed what it writes and the pattern stopped
+matching. Nothing fails — nothing arrives. The machine cannot see this on its own, because
+the agent deliberately keeps no record of what it delivered; after a restart its memory of
+every station is empty. So ADL tells it.
+
+Each station link carries **`last_received_at`**: when ADL last received *anything* for that
+station, or `null` if it never has. Every file counts, whatever ADL then made of it — a file
+that failed to decode still proves the folder, the pattern, the share and the upload all
+worked, and the fault is a variable mapping or a CSV config, fixed here by an administrator
+rather than by anyone standing at the vendor's server.
+
+Beside it each connection's admin tier carries **`stale_after_minutes`**: how long one of
+that vendor's stations may say nothing before the machine's own station list marks it quiet.
+It is per connection because a cadence belongs to the vendor's software, not to the station
+it happens to be writing for — a device serving two vendors and forty stations has two
+cadences, not forty. Left empty on the connection it resolves to this instance's default,
+six hours, settable with `ADL_AGENT_STATION_STALE_AFTER_MINUTES`. Raise it on the connection
+for a vendor that legitimately writes one file a day; a station that is quiet every night by
+design is a mark people stop reading.
+
+The number is resolved to minutes before it goes on the wire rather than sent as a blank for
+the machine to fill in, so a deployment that changes its default is followed by the whole
+fleet on the next cycle instead of only by freshly installed machines.
+
 ### Admin
 
 **Agent Devices** in the main menu — the fleet view as well as the enrollment form; see

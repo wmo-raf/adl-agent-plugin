@@ -58,6 +58,20 @@ DEFAULT_CYCLE_STUCK_MULTIPLIER = 2
 #: wrong timezone would produce.
 DEFAULT_CLOCK_SKEW_ADVISORY_SECONDS = 5 * 60
 
+#: How long a station may go without ADL receiving a file from it before the
+#: agent's own window calls it quiet. Six hours rather than a multiple of the
+#: check interval, because the check interval is how often the machine
+#: *scans* and says nothing about how often the vendor *writes*: a station
+#: whose logger produces one file a day would be permanently quiet against a
+#: ten-minute scan cadence.
+#:
+#: Six is the number that catches a logger which stopped at breakfast on the
+#: same morning. It is the wrong number for a vendor that legitimately writes
+#: once a day, which is why it is a floor a connection may raise -- see
+#: ``AgentConnection.stale_after_minutes``. A deployment whose slowest vendor
+#: is slower than every fast one is better served raising it there than here.
+DEFAULT_STATION_STALE_AFTER_MINUTES = 6 * 60
+
 #: How often the standing layer-5 verdict is refreshed when nothing has
 #: changed. Core stops trusting a probe result after fifteen minutes, so a
 #: third of that leaves two chances to miss a sweep before the connection's
@@ -72,6 +86,7 @@ DEGRADED_AFTER_MISSED_SETTING = "ADL_AGENT_DEGRADED_AFTER_MISSED"
 OFFLINE_AFTER_MISSED_SETTING = "ADL_AGENT_OFFLINE_AFTER_MISSED"
 CYCLE_STUCK_MULTIPLIER_SETTING = "ADL_AGENT_CYCLE_STUCK_MULTIPLIER"
 CLOCK_SKEW_ADVISORY_SETTING = "ADL_AGENT_CLOCK_SKEW_ADVISORY_SECONDS"
+STATION_STALE_AFTER_SETTING = "ADL_AGENT_STATION_STALE_AFTER_MINUTES"
 
 
 class LivenessState:
@@ -165,6 +180,12 @@ def cycle_stuck_multiplier():
 def clock_skew_advisory_seconds():
     return _threshold(CLOCK_SKEW_ADVISORY_SETTING,
                       DEFAULT_CLOCK_SKEW_ADVISORY_SECONDS)
+
+
+def station_stale_after_minutes():
+    """The deployment-wide floor a connection's own window may raise."""
+    return _threshold(STATION_STALE_AFTER_SETTING,
+                      DEFAULT_STATION_STALE_AFTER_MINUTES)
 
 
 @dataclass(frozen=True)
