@@ -42,11 +42,18 @@ def device_payload(device):
     heartbeats (decision #264). It is the server's number, handed out rather
     than compiled into the agent, so a deployment can change how closely it
     watches its fleet without touching a machine in the field.
+
+    ``dated_folder_window_hours`` is how far back a cycle walks the dated
+    sub-folders of a station filed by date. Here rather than left to the
+    agent's own default because the cost it bounds is this machine's:
+    expanding a year of hourly folders is 8,760 directory listings every
+    check interval, on exactly the country links this product exists for.
     """
     return {
         **device_summary(device),
         "check_interval_minutes": device.check_interval_minutes,
         "heartbeat_interval_minutes": heartbeat_interval_minutes(),
+        "dated_folder_window_hours": device.dated_folder_window_hours,
     }
 
 

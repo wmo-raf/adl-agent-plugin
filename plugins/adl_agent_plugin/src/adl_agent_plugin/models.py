@@ -135,6 +135,32 @@ class AgentDevice(models.Model):
         ),
     )
 
+    #: How far back a routine cycle walks a station's dated sub-folders.
+    #: Per device for the same reason the check interval is: what a machine
+    #: can afford to enumerate every cycle is a question about its disks and
+    #: its share, not about the vendor whose folders it happens to hold.
+    #:
+    #: Only stations with ``dir_structured_by_date`` are affected, and only
+    #: on an ordinary cycle -- the daily reconciliation walks back to the
+    #: collection start date regardless, which is what makes it safe to keep
+    #: this small.
+    dated_folder_window_hours = models.PositiveIntegerField(
+        default=48,
+        # Zero is allowed and means the current folder alone -- a real
+        # choice for a machine on a link that cannot afford more, and one
+        # the agent obeys rather than clamps away. No ceiling: the agent
+        # caps what it will actually walk and says so when the cap bites,
+        # which is a better place for that judgement than this model.
+        validators=[MinValueValidator(0)],
+        verbose_name=_("Dated folder window (hours)"),
+        help_text=_(
+            "For stations whose files sit under dated sub-folders: how far "
+            "back each cycle walks the tree. Two days suits a vendor that "
+            "files by day or hour. Anything older is picked up by the daily "
+            "reconciliation."
+        ),
+    )
+
     #: Monotonic counter over everything this device is configured with --
     #: its connections, its station links, and their variable mappings. The
     #: agent caches its configuration and re-reads it when this number moves,
@@ -267,6 +293,7 @@ class AgentDevice(models.Model):
             FieldPanel("name"),
             FieldPanel("description"),
             FieldPanel("check_interval_minutes"),
+            FieldPanel("dated_folder_window_hours"),
             FieldPanel("pinned_version"),
         ], heading=_("Device")),
         AgentDeviceIdentityPanel(heading=_("Identity")),
@@ -2301,15 +2328,20 @@ def _bump_owning_device(sender, instance, **kwargs):
 
 
 def _bump_device_itself(sender, instance, created, update_fields=None, **kwargs):
-    # The device row carries exactly one piece of configuration -- its check
-    # interval -- and the credential writes beside it (a rotation, a revoke)
-    # change nothing an agent caches. Those name their fields, so they are
-    # told apart from an administrator saving the edit form, which names
-    # none.
+    # The device row carries two pieces of configuration -- its check
+    # interval and its dated folder window -- and the credential writes
+    # beside them (a rotation, a revoke) change nothing an agent caches.
+    # Those name their fields, so they are told apart from an administrator
+    # saving the edit form, which names none.
+    #
+    # A field added to the device tier and not added here is one an
+    # administrator can change and no machine in the fleet will ever see.
     if created:
         return
 
-    if update_fields is None or "check_interval_minutes" in update_fields:
+    configuration = {"check_interval_minutes", "dated_folder_window_hours"}
+
+    if update_fields is None or configuration & set(update_fields):
         instance.bump_config_version()
 
 

@@ -34,7 +34,8 @@ class AgentDeviceAdminTests(TestCase):
     def create_device(self, name="Dar es Salaam server"):
         response = self.client.post(
             reverse("agent_devices:add"),
-            {"name": name, "description": "", "check_interval_minutes": 5},
+            {"name": name, "description": "", "check_interval_minutes": 5,
+             "dated_folder_window_hours": 48},
         )
         self.assertEqual(response.status_code, 302, response.content)
         return AgentDevice.objects.get(name=name)

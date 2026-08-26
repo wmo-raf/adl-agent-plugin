@@ -461,7 +461,8 @@ class FleetListingTests(HeartbeatDrivenTestCase):
         response = self.client.post(
             reverse("agent_devices:edit", args=[self.device.pk]),
             {"name": self.device.name, "description": "",
-             "check_interval_minutes": 5, "pinned_version": "1.3.9"},
+             "check_interval_minutes": 5, "dated_folder_window_hours": 48,
+             "pinned_version": "1.3.9"},
         )
 
         self.assertEqual(response.status_code, 302, response.content)
