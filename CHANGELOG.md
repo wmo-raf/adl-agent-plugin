@@ -17,6 +17,21 @@ in the git log.
 
 ### Added
 
+- **Reconciliation interval, per deployment.** The device block of `sync` --
+  and the heartbeat response beside it -- now carries
+  `reconciliation_interval_hours`: how often a station stops trusting the cheap
+  scan path and offers everything back to its collection start date. Daily by
+  default, which is what every install already did; set with
+  `ADL_AGENT_RECONCILIATION_INTERVAL_HOURS` (Django settings or the
+  environment), and `0` switches sweeps off for a link that cannot carry a full
+  folder's manifest. Deployment-wide rather than per device, like the heartbeat
+  interval it sits next to, because what a sweep spends is manifest traffic on
+  the link to ADL rather than anything on the machine's disks. The agent has
+  read this field since it learned to reconcile
+  ([wmo-raf/adl#280](https://github.com/wmo-raf/adl/issues/280)) and fell back
+  to a fixed 24 hours while nothing sent it; an agent that predates the field
+  ignores it. No migration.
+
 - **Dated folder window, per device.** `AgentDevice.dated_folder_window_hours`
   (two days by default) now travels in the device block of the sync response as
   `dated_folder_window_hours`. It is how far back an agent walks the dated

@@ -14,7 +14,7 @@ from ``liveness_of``, so "fifteen minutes of silence" is a value, not a sleep.
 
 from datetime import timedelta
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone as dj_timezone
 
@@ -147,6 +147,21 @@ class HeartbeatSnapshotTests(HeartbeatTestCase):
         body = self.client.get(SYNC_URL, **bearer(self.token)).json()
 
         self.assertEqual(body["device"]["heartbeat_interval_minutes"], 5)
+
+    def test_the_reconciliation_cadence_rides_the_response_too(self):
+        # The third cadence a machine runs on, beside the scan loop and the
+        # heartbeat loop. It travels on the call made most often for the same
+        # reason the other two do: a fleet follows a change to it without
+        # anybody being sent to a machine.
+        body = self.heartbeat({}).json()
+
+        self.assertEqual(body["reconciliation_interval_hours"], 24)
+
+    @override_settings(ADL_AGENT_RECONCILIATION_INTERVAL_HOURS=0)
+    def test_a_deployment_can_switch_reconciliation_off_over_the_heartbeat(self):
+        self.assertEqual(
+            self.heartbeat({}).json()["reconciliation_interval_hours"], 0
+        )
 
     def test_an_unauthenticated_heartbeat_is_refused(self):
         response = self.client.post(

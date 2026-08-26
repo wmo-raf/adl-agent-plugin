@@ -202,6 +202,49 @@ class SyncDeviceTierTests(SyncTestCase):
 
         self.assertEqual(self.sync().json()["device"]["dated_folder_window_hours"], 0)
 
+    def test_the_reconciliation_interval_defaults_to_daily(self):
+        # What every install in the field already does, so a deployment that
+        # upgrades and configures nothing keeps the cadence it had.
+        self.assertEqual(
+            self.sync().json()["device"]["reconciliation_interval_hours"], 24
+        )
+
+    @override_settings(ADL_AGENT_RECONCILIATION_INTERVAL_HOURS=168)
+    def test_a_deployment_can_slow_the_reconciliation_down(self):
+        # A country whose link cannot carry a full folder's manifest nightly
+        # is the reason this is settable at all.
+        self.assertEqual(
+            self.sync().json()["device"]["reconciliation_interval_hours"], 168
+        )
+
+    @override_settings(ADL_AGENT_RECONCILIATION_INTERVAL_HOURS=0)
+    def test_a_reconciliation_interval_of_nothing_switches_sweeps_off(self):
+        # Zero is an administrator switching reconciliation off, and has to
+        # arrive as 0 rather than be clamped up to the default or dropped:
+        # the agent reads a missing field as "reconcile daily", which is the
+        # opposite instruction.
+        self.assertEqual(
+            self.sync().json()["device"]["reconciliation_interval_hours"], 0
+        )
+
+    @override_settings(ADL_AGENT_RECONCILIATION_INTERVAL_HOURS=-1)
+    def test_a_negative_reconciliation_interval_also_means_off(self):
+        # The contract reads zero and below alike, so an administrator who
+        # typed -1 meaning "never" must not be quietly given daily sweeps.
+        # It arrives as the number the contract names.
+        self.assertEqual(
+            self.sync().json()["device"]["reconciliation_interval_hours"], 0
+        )
+
+    @override_settings(ADL_AGENT_RECONCILIATION_INTERVAL_HOURS="nightly")
+    def test_a_mistyped_reconciliation_interval_falls_back_to_daily(self):
+        # Unreadable is not the same as zero: a deployment that fat-fingers
+        # the setting keeps reconciling rather than silently losing the sweep
+        # that catches a backfilled file.
+        self.assertEqual(
+            self.sync().json()["device"]["reconciliation_interval_hours"], 24
+        )
+
 
 class SyncConfigVersionTests(SyncTestCase):
     def test_a_settled_configuration_keeps_its_version(self):
