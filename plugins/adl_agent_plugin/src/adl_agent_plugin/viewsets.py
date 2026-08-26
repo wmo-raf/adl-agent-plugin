@@ -1,3 +1,5 @@
+from django.utils.translation import gettext_lazy as _
+from wagtail.admin.viewsets import ViewSetGroup
 from wagtail.admin.viewsets.model import ModelViewSet
 
 from .models import AgentDevice, AgentRelease
@@ -23,8 +25,10 @@ class AgentDeviceViewSet(ModelViewSet):
     model = AgentDevice
     icon = "desktop"
     menu_label = "Agent Devices"
-    menu_order = 500
-    add_to_admin_menu = True
+    # Reached through Settings > ADL Agent rather than off the top-level menu:
+    # enrolling a machine and pinning it to a release are administration, and
+    # they sit next to the other things an administrator configures once.
+    add_to_admin_menu = False
     copy_view_enabled = False
     inspect_view_enabled = False
     list_display = [
@@ -67,8 +71,7 @@ class AgentReleaseViewSet(ModelViewSet):
     model = AgentRelease
     icon = "download"
     menu_label = "Agent Releases"
-    menu_order = 510
-    add_to_admin_menu = True
+    add_to_admin_menu = False
     copy_view_enabled = False
     inspect_view_enabled = False
     list_display = [
@@ -83,3 +86,25 @@ class AgentReleaseViewSet(ModelViewSet):
 
 
 agent_release_viewset = AgentReleaseViewSet("agent_releases")
+
+
+class AgentSettingsViewSetGroup(ViewSetGroup):
+    """The plugin's two administrative listings, folded into Settings.
+
+    The submenu order is the order of ``items`` -- ``ViewSetGroup`` numbers
+    them itself and ignores each viewset's own ``menu_order`` -- so devices
+    come before releases, which is the order they are set up in.
+    """
+
+    menu_label = _("ADL Agent")
+    menu_icon = "desktop"
+    add_to_settings_menu = True
+    # 910 rather than the 900 the wis2box and FTP groups both use: sharing a
+    # value leaves the three ordered by tie-break, and this one belongs after
+    # them.
+    menu_order = 910
+
+    items = [
+        agent_device_viewset,
+        agent_release_viewset,
+    ]

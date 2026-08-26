@@ -8,7 +8,11 @@ from wagtail.snippets.views.snippets import SnippetViewSet
 from .bulk_actions import ReprocessBulkAction
 from .models import AgentStationDataFile
 from .views import issue_pairing_code, revoke_device
-from .viewsets import agent_device_viewset, agent_release_viewset
+from .viewsets import (
+    AgentSettingsViewSetGroup,
+    agent_device_viewset,
+    agent_release_viewset,
+)
 
 
 @hooks.register("register_admin_urls")
@@ -27,14 +31,17 @@ def urlconf_adl_agent_plugin():
     ]
 
 
+# The two viewsets are still registered individually -- that is what builds
+# their URLs; ``ViewSetGroup.on_register`` only puts the menu item up. Each
+# one carries ``add_to_admin_menu = False``, so the single entry point is the
+# group's Settings > ADL Agent submenu.
 @hooks.register("register_admin_viewset")
-def register_agent_device_viewset():
-    return agent_device_viewset
-
-
-@hooks.register("register_admin_viewset")
-def register_agent_release_viewset():
-    return agent_release_viewset
+def register_agent_viewsets():
+    return [
+        agent_device_viewset,
+        agent_release_viewset,
+        AgentSettingsViewSetGroup(),
+    ]
 
 
 # Offering re-processing on the file listing (story 21). A bulk action rather

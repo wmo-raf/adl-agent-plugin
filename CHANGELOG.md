@@ -15,6 +15,13 @@ in the git log.
 
 ## [Unreleased]
 
+### Changed
+
+- **The admin menu.** *Agent Devices* and *Agent Releases* no longer sit at the
+  top level of the sidebar; both are now reached through
+  *Settings > ADL Agent*. Both are administration done once per machine or per
+  release, and the top level is for the things an operator opens every morning.
+
 ## [0.2.0] — 2026-08-25
 
 The first tagged release, numbered to match the agent it serves. Everything
