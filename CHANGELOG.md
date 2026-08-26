@@ -13,7 +13,7 @@ notes** section listing the migrations it ships and anything an operator must do
 This file starts at 0.2.0, which is the first tagged release. Earlier history is
 in the git log.
 
-## [Unreleased]
+## [0.3.0] — 2026-08-26
 
 ### Added
 
@@ -56,6 +56,20 @@ Ships one migration:
 - `0011_agentdevice_dated_folder_window_hours` — adds the field with a default
   of 48, which is what agents assumed before it existed. Nothing to do before
   running it, and no behaviour changes for a deployment that leaves it alone.
+
+One new setting, optional and defaulted:
+
+- `ADL_AGENT_RECONCILIATION_INTERVAL_HOURS` (default `24`) — how often a
+  station offers its whole folder back to its collection start date. Leave it
+  alone and the fleet behaves exactly as it did before this release. `0`
+  switches sweeps off, for a deployment whose links cannot carry a full
+  folder's manifest.
+
+Both halves are backward-compatible in both directions: an agent predating
+[wmo-raf/adl#280](https://github.com/wmo-raf/adl/issues/280) or
+[#289](https://github.com/wmo-raf/adl/issues/289) ignores the new device-block
+keys, and an agent that reads them falls back to its own defaults against an
+older plugin. Upgrading the two sides in either order is safe.
 
 ## [0.2.0] — 2026-08-25
 
@@ -124,5 +138,6 @@ Two settings are worth knowing about, both optional and both defaulted:
 - `ADL_AGENT_RELEASE_MIRROR_ENABLED` (default `false`) — agent release mirroring
   stays off until an instance asks for it.
 
-[Unreleased]: https://github.com/wmo-raf/adl-agent-plugin/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/wmo-raf/adl-agent-plugin/releases/tag/v0.2.0
+[Unreleased]: https://github.com/wmo-raf/adl-agent-plugin/compare/0.3.0...HEAD
+[0.3.0]: https://github.com/wmo-raf/adl-agent-plugin/compare/0.2.0...0.3.0
+[0.2.0]: https://github.com/wmo-raf/adl-agent-plugin/releases/tag/0.2.0
