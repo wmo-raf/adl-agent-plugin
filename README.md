@@ -422,7 +422,7 @@ plugin is its first user: on a core that predates it the flag is simply an unrea
 attribute — the plugin still runs, but layer 4 falls back to reporting itself unsupported
 and completed drains are read as source evidence again.)
 
-**In the device listing** — *Agent Devices* in the main menu — which doubles as the fleet
+**In the device listing** — *Settings > ADL Agent > Agent Devices* — which doubles as the fleet
 view: name, agent version, state, last heartbeat, clock skew, and the version pin. A
 device's own page carries the reading behind its state: uptime, backlog, free disk, the
 per-station scan counts from its last cycle, and its recent state changes.
@@ -598,7 +598,7 @@ fleet on the next cycle instead of only by freshly installed machines.
 
 ### Admin
 
-**Agent Devices** in the main menu — the fleet view as well as the enrollment form; see
+**Agent Devices** under *Settings > ADL Agent* — the fleet view as well as the enrollment form; see
 [Fleet health](#fleet-health-offline-stuck-or-skewed). Creating a device issues its first
 pairing code immediately; the device's page shows the code, its expiry, and the two
 actions:
@@ -617,7 +617,7 @@ reads them (and its CSV configuration, where the decoder needs one), how long it
 bytes are kept, and the variable mappings for the vendor's file columns; a station link binds one ADL station to one folder
 on that machine, and may override a mapping the connection got wrong for it.
 
-**Agent Releases** in the main menu — what this instance can offer its fleet. A release
+**Agent Releases** under *Settings > ADL Agent* — what this instance can offer its fleet. A release
 holds one package per install tier; **Published** is what decides whether any machine is
 offered it, and a release mirrored from upstream arrives unpublished. Pasting the digest a
 build published into **Expected SHA-256** makes the upload refuse itself unless the bytes
