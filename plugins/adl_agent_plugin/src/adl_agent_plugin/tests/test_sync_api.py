@@ -178,6 +178,30 @@ class SyncDeviceTierTests(SyncTestCase):
 
         self.assertEqual(body["device"]["check_interval_minutes"], 12)
 
+    def test_the_dated_folder_window_is_per_device(self):
+        self.device.dated_folder_window_hours = 240
+        self.device.save()
+
+        body = self.sync().json()
+
+        self.assertEqual(body["device"]["dated_folder_window_hours"], 240)
+
+    def test_the_dated_folder_window_defaults_to_two_days(self):
+        # What the agent assumed before the field existed, so an instance
+        # that migrates and changes nothing keeps the behaviour it had.
+        self.assertEqual(self.sync().json()["device"]["dated_folder_window_hours"], 48)
+
+    def test_a_dated_folder_window_of_nothing_survives_the_wire(self):
+        # Zero is an administrator asking for the current folder alone, which
+        # is a real choice for a machine on a link that cannot afford more.
+        # It has to arrive as 0 rather than be clamped or dropped: the agent
+        # reads a missing field as "use the default", which is the opposite
+        # instruction.
+        self.device.dated_folder_window_hours = 0
+        self.device.save()
+
+        self.assertEqual(self.sync().json()["device"]["dated_folder_window_hours"], 0)
+
 
 class SyncConfigVersionTests(SyncTestCase):
     def test_a_settled_configuration_keeps_its_version(self):
@@ -185,6 +209,18 @@ class SyncConfigVersionTests(SyncTestCase):
         second = self.sync().json()["config_version"]
 
         self.assertEqual(first, second)
+
+    def test_changing_the_dated_folder_window_moves_the_version(self):
+        # A device-tier setting an administrator can change and no machine
+        # ever sees is the failure mode this assertion exists for: the agent
+        # re-reads its configuration when the version moves, and on nothing
+        # else.
+        before = self.sync().json()["config_version"]
+
+        self.device.dated_folder_window_hours = 12
+        self.device.save(update_fields=["dated_folder_window_hours"])
+
+        self.assertGreater(self.sync().json()["config_version"], before)
 
     def test_creating_a_connection_moves_the_version(self):
         before = self.sync().json()["config_version"]

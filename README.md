@@ -542,7 +542,15 @@ is HQ's call; where the files sit and how they are named is the machine's.**
 |------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------|
 | Admin-only       | Device lifecycle, which station a link is for, whether it is enabled, variable mappings, collection start date                                              | ADL admin               |
 | App-editable     | Local folder path, file pattern, folder-structure settings, listing strategy and its Direct Fetch settings, stability window                                | The app, or the admin   |
-| Per device       | Check interval — one loop per machine scans every folder it has                                                                                              | ADL admin               |
+| Per device       | Check interval — one loop per machine scans every folder it has; dated folder window — how far back a cycle walks a dated tree                               | ADL admin               |
+
+The dated folder window is per device for the same reason the check interval is: what a
+machine can afford to enumerate every cycle is a question about its disks and its share,
+not about the vendor whose folders it happens to hold. It bounds one cost only —
+expanding a station filed by hour from its collection start date is 8,760 directory
+listings *every* check interval, on exactly the country links this product exists for.
+Two days by default; `0` means the current folder alone. Anything older is picked up by
+the agent's daily reconciliation, so the window is safe to keep small.
 
 The check interval sits in the app's tier in the design too, but the API contract has no
 device-scoped write — its five endpoints are pair, sync, manifest, files, and per-link

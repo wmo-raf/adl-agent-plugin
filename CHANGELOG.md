@@ -15,12 +15,32 @@ in the git log.
 
 ## [Unreleased]
 
+### Added
+
+- **Dated folder window, per device.** `AgentDevice.dated_folder_window_hours`
+  (two days by default) now travels in the device block of the sync response as
+  `dated_folder_window_hours`. It is how far back an agent walks the dated
+  sub-folders of a station with `dir_structured_by_date` on an ordinary cycle;
+  anything older is picked up by the agent's daily reconciliation. `0` means the
+  current folder alone. The agent has read this field since it learned to walk
+  dated trees ([wmo-raf/adl#289](https://github.com/wmo-raf/adl/issues/289)) and
+  fell back to its own two-day default while nothing sent it; an agent that
+  predates the field ignores it.
+
 ### Changed
 
 - **The admin menu.** *Agent Devices* and *Agent Releases* no longer sit at the
   top level of the sidebar; both are now reached through
   *Settings > ADL Agent*. Both are administration done once per machine or per
   release, and the top level is for the things an operator opens every morning.
+
+### Upgrade notes
+
+Ships one migration:
+
+- `0011_agentdevice_dated_folder_window_hours` — adds the field with a default
+  of 48, which is what agents assumed before it existed. Nothing to do before
+  running it, and no behaviour changes for a deployment that leaves it alone.
 
 ## [0.2.0] — 2026-08-25
 
