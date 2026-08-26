@@ -354,7 +354,7 @@ curl -X POST http://localhost:8080/plugins/api/agent/v1/heartbeat/ \
                     "total_bytes": 274877906944}]}'
 # -> 200 {"status": "online", "clock_skew_seconds": 4, "server_time": "...",
 #         "heartbeat_interval_minutes": 5, "check_interval_minutes": 5,
-#         "config_version": 6}
+#         "reconciliation_interval_hours": 24, "config_version": 6}
 ```
 
 Everything in the body is optional. A heartbeat ADL refuses is a heartbeat that never
@@ -367,11 +367,13 @@ looking healthy while every number ADL shows is quietly missing.
 subtracts its own clock. The number goes back in the response, because the machine is the
 only party that can do anything about its own clock.
 
-**The cadence and the config version ride the response**, so the two things a machine most
+**The cadences and the config version ride the response**, so the things a machine most
 needs to keep in step travel on the call it makes most often: a fleet follows a cadence
 change without being reinstalled, and a machine whose configuration moved learns within
-five minutes rather than at its next scan. The cadence is in every `sync` response too, and
-is set with `ADL_AGENT_HEARTBEAT_INTERVAL_MINUTES`.
+five minutes rather than at its next scan. All three cadences are in every `sync` response
+too — the heartbeat interval, set with `ADL_AGENT_HEARTBEAT_INTERVAL_MINUTES`; the
+reconciliation interval, set with `ADL_AGENT_RECONCILIATION_INTERVAL_HOURS`; and the
+device's own check interval.
 
 #### The states
 
@@ -543,6 +545,7 @@ is HQ's call; where the files sit and how they are named is the machine's.**
 | Admin-only       | Device lifecycle, which station a link is for, whether it is enabled, variable mappings, collection start date                                              | ADL admin               |
 | App-editable     | Local folder path, file pattern, folder-structure settings, listing strategy and its Direct Fetch settings, stability window                                | The app, or the admin   |
 | Per device       | Check interval — one loop per machine scans every folder it has; dated folder window — how far back a cycle walks a dated tree                               | ADL admin               |
+| Per deployment   | Heartbeat interval, reconciliation interval, liveness thresholds — one fleet-wide policy each                                                                | Django settings or env  |
 
 The dated folder window is per device for the same reason the check interval is: what a
 machine can afford to enumerate every cycle is a question about its disks and its share,
@@ -550,7 +553,21 @@ not about the vendor whose folders it happens to hold. It bounds one cost only �
 expanding a station filed by hour from its collection start date is 8,760 directory
 listings *every* check interval, on exactly the country links this product exists for.
 Two days by default; `0` means the current folder alone. Anything older is picked up by
-the agent's daily reconciliation, so the window is safe to keep small.
+the reconciliation sweep, so the window is safe to keep small.
+
+**The reconciliation cadence is the deployment's, not the device's.** Once every
+`reconciliation_interval_hours` a station stops trusting the cheap path and offers
+everything back to its collection start date — a whole folder for an enumerating station,
+every name it can build for a `DIRECT_FETCH` one — which is what catches a file backfilled
+weeks late, or one whose timestamps make it look old however it arrived. Daily by default,
+set with `ADL_AGENT_RECONCILIATION_INTERVAL_HOURS`, and served in the device block of
+`sync` — and on the heartbeat response beside the other two cadences — so a fleet follows
+a change without being reinstalled. `0` switches sweeps off entirely, for a link that
+cannot carry a full folder's manifest at all. It is deployment-wide rather than per
+machine because what a sweep spends is manifest traffic on the link to ADL, not anything
+on the machine's own disks. An agent predating
+[wmo-raf/adl#280](https://github.com/wmo-raf/adl/issues/280) ignores the field and
+reconciles daily.
 
 The check interval sits in the app's tier in the design too, but the API contract has no
 device-scoped write — its five endpoints are pair, sync, manifest, files, and per-link

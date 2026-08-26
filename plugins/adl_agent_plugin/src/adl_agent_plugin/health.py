@@ -72,6 +72,21 @@ DEFAULT_CLOCK_SKEW_ADVISORY_SECONDS = 5 * 60
 #: is slower than every fast one is better served raising it there than here.
 DEFAULT_STATION_STALE_AFTER_MINUTES = 6 * 60
 
+#: How often a station stops trusting the cheap scan path and offers its whole
+#: folder back to its collection start date (wmo-raf/adl#280). Daily, which is
+#: what every agent in the field assumed while nothing served this number.
+#:
+#: Deployment-wide rather than per machine because what a sweep spends is
+#: manifest traffic on the link between a country and ADL, not anything on the
+#: machine's own disks -- so a deployment on a satellite link wants its whole
+#: fleet slower, not one server of it.
+DEFAULT_RECONCILIATION_INTERVAL_HOURS = 24
+
+#: What the wire carries for a deployment that has switched sweeps off. The
+#: agent reads zero and anything below it alike, so the number handed out is
+#: normalised to the one the contract names.
+NO_RECONCILIATION = 0
+
 #: How often the standing layer-5 verdict is refreshed when nothing has
 #: changed. Core stops trusting a probe result after fifteen minutes, so a
 #: third of that leaves two chances to miss a sweep before the connection's
@@ -87,6 +102,7 @@ OFFLINE_AFTER_MISSED_SETTING = "ADL_AGENT_OFFLINE_AFTER_MISSED"
 CYCLE_STUCK_MULTIPLIER_SETTING = "ADL_AGENT_CYCLE_STUCK_MULTIPLIER"
 CLOCK_SKEW_ADVISORY_SETTING = "ADL_AGENT_CLOCK_SKEW_ADVISORY_SECONDS"
 STATION_STALE_AFTER_SETTING = "ADL_AGENT_STATION_STALE_AFTER_MINUTES"
+RECONCILIATION_INTERVAL_SETTING = "ADL_AGENT_RECONCILIATION_INTERVAL_HOURS"
 
 
 class LivenessState:
@@ -143,6 +159,9 @@ def _threshold(name, default, minimum=1):
 
     A deployment that mistypes a threshold gets ADL's default and keeps its
     fleet monitoring, rather than an instance that will not start.
+
+    ``minimum=None`` for a threshold whose vocabulary runs below one, where
+    only an unreadable value is nonsense and every integer means something.
     """
     raw = getattr(settings, name, None)
 
@@ -153,6 +172,9 @@ def _threshold(name, default, minimum=1):
         value = int(raw)
     except (TypeError, ValueError):
         return default
+
+    if minimum is None:
+        return value
 
     return value if value >= minimum else default
 
@@ -186,6 +208,25 @@ def station_stale_after_minutes():
     """The deployment-wide floor a connection's own window may raise."""
     return _threshold(STATION_STALE_AFTER_SETTING,
                       DEFAULT_STATION_STALE_AFTER_MINUTES)
+
+
+def reconciliation_interval_hours():
+    """How often an agent offers a station's whole folder, or 0 for never.
+
+    The one threshold with no floor: zero and below are not mistyped numbers
+    here but a deployment saying the sweep costs more than it is worth, and
+    falling back to daily would be ADL overruling that silently on a link
+    that cannot afford it. Anything unreadable is still nonsense and still
+    takes the default.
+
+    Below zero is normalised up to zero on the way out. The agent treats the
+    two alike, and a fleet reading its own configuration back should see the
+    number the contract names rather than whatever an operator typed.
+    """
+    hours = _threshold(RECONCILIATION_INTERVAL_SETTING,
+                       DEFAULT_RECONCILIATION_INTERVAL_HOURS, minimum=None)
+
+    return max(hours, NO_RECONCILIATION)
 
 
 @dataclass(frozen=True)

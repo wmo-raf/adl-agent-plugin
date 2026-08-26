@@ -14,7 +14,11 @@ beside the field's definition. This module assembles the rest.
 
 from django.utils import timezone as dj_timezone
 
-from .health import heartbeat_interval_minutes, station_stale_after_minutes
+from .health import (
+    heartbeat_interval_minutes,
+    reconciliation_interval_hours,
+    station_stale_after_minutes,
+)
 from .limits import MANIFEST_PAGE_LIMIT, MAX_UPLOAD_BYTES
 from .models import AgentConnection, AgentStationDataFile, AgentStationLink
 
@@ -48,12 +52,21 @@ def device_payload(device):
     agent's own default because the cost it bounds is this machine's:
     expanding a year of hourly folders is 8,760 directory listings every
     check interval, on exactly the country links this product exists for.
+
+    ``reconciliation_interval_hours`` is the third cadence, and the one the
+    window above is only affordable because of: how often a station offers
+    everything back to its collection start date instead of trusting the
+    cheap path (wmo-raf/adl#280). Deployment-wide, so it is read from the
+    setting rather than the row -- see ``health.reconciliation_interval_hours``
+    for why it is a policy and not a field. Sent even when it is zero, since
+    to an agent an absent key means "reconcile daily" and zero means "never".
     """
     return {
         **device_summary(device),
         "check_interval_minutes": device.check_interval_minutes,
         "heartbeat_interval_minutes": heartbeat_interval_minutes(),
         "dated_folder_window_hours": device.dated_folder_window_hours,
+        "reconciliation_interval_hours": reconciliation_interval_hours(),
     }
 
 
@@ -183,6 +196,7 @@ def heartbeat_payload(device, liveness):
         "status": liveness.state,
         "heartbeat_interval_minutes": heartbeat_interval_minutes(),
         "check_interval_minutes": device.check_interval_minutes,
+        "reconciliation_interval_hours": reconciliation_interval_hours(),
         "config_version": device.current_config_version(),
     }
 
