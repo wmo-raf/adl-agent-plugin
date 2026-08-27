@@ -9,7 +9,9 @@ than reaching for the models the view happens to read.
 """
 
 from datetime import timedelta
+from pathlib import Path
 
+from adl import __version__ as adl_version
 from django.db import connections
 from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
@@ -21,6 +23,7 @@ from adl_agent_plugin.models import (
     AgentListingStrategy,
     AgentStationLink,
 )
+from adl_agent_plugin.version import VERSION as PLUGIN_VERSION
 
 from .helpers import (
     SYNC_URL,
@@ -483,3 +486,55 @@ class SyncQuietWindowTests(SyncTestCase):
         connection.save()
 
         self.assertGreater(self.sync().json()["config_version"], before)
+
+
+class SyncServerTierTests(SyncTestCase):
+    """What the instance says about itself.
+
+    Read by nobody but a person: the agent shows these two strings on its
+    Status tab and changes no behaviour on them. So what these tests pin is
+    where the strings live and that they are the real numbers -- because the
+    failure mode is not a crash, it is a technician reading a version that
+    was true at some other time.
+    """
+
+    def server_tier(self):
+        return self.sync().json()["server"]
+
+    def test_the_instance_says_which_adl_it_is(self):
+        self.assertEqual(self.server_tier()["adl_version"], adl_version)
+
+    def test_the_instance_says_which_plugin_it_is(self):
+        self.assertEqual(self.server_tier()["plugin_version"], PLUGIN_VERSION)
+
+    def test_a_device_with_nothing_linked_yet_is_still_told(self):
+        # The block describes the instance, not the machine asking, so a
+        # device on its first morning gets it in full. This is also when
+        # somebody is most likely to be looking: half of "why is this field
+        # missing?" is answered by knowing which ADL is on the other end.
+        device, token = paired_device(name="Fresh install")
+
+        body = self.client.get(SYNC_URL, **bearer(token)).json()
+
+        self.assertEqual(body["server"]["plugin_version"], PLUGIN_VERSION)
+
+    def test_the_versions_are_top_level_and_not_in_the_device_block(self):
+        # Every device on this instance gets the same two strings, so they do
+        # not belong under a block whose whole meaning is "yours". Pinned
+        # because the tidier-looking arrangement is the wrong one, and the
+        # agent reads them from the top level.
+        body = self.sync().json()
+
+        self.assertNotIn("adl_version", body["device"])
+        self.assertNotIn("plugin_version", body["device"])
+
+    def test_the_packaged_version_is_not_stated_a_second_time(self):
+        # setup.py reads version.py. A literal re-appearing there is how the
+        # two come to disagree -- and they disagree silently, since nothing
+        # compares them at build time.
+        setup_py = (
+            Path(__file__).resolve().parents[3] / "setup.py"
+        ).read_text()
+
+        self.assertNotIn(f'"{PLUGIN_VERSION}"', setup_py)
+        self.assertIn("version.py", setup_py)

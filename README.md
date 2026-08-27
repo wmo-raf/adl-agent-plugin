@@ -171,6 +171,31 @@ in the field follows a change without being reinstalled:
   vendor's server room can answer. Clamped to 32 here and again on the agent's own side.
   An agent that predates the field uploads one at a time.
 
+**What this instance is**, in every `sync` response under `server`
+([wmo-raf/adl#305](https://github.com/wmo-raf/adl/issues/305)):
+
+```json
+"server": {"adl_version": "0.8.14", "plugin_version": "0.4.0"}
+```
+
+Two strings nothing acts on. They exist because the compatibility question — *this agent,
+that ADL core, that plugin* — could be answered only by somebody holding a Wagtail login,
+usually in another country: the agent's own version has travelled here on every call since
+the beginning (`X-Agent-Version`), and nothing went the other way. Now the tray's Status
+tab and `adl-agent status` can both answer it at the machine.
+
+Top-level rather than inside `device`, because it describes this instance and not the
+machine that asked — every device gets the same two strings. On `sync` and not the
+heartbeat, against the precedent `reconciliation_interval_hours` sets by riding both: a
+sync response is cached by the agent byte for byte, so the answer survives a service
+restart and still reads correctly on a machine that has lost its link, which is exactly
+when somebody is looking at it. An agent's memory of a heartbeat does not.
+
+The plugin's number comes from `adl_agent_plugin/version.py`, which `setup.py` reads, so
+the packaged version and the served one cannot drift. An agent talking to an ADL that
+predates the block shows *"Not reported — this ADL predates the field"* rather than a
+blank, because "too old to say" is itself a lower bound on the far end's version.
+
 **Verification.** The declared size is checked as well as the hash, because size is the one
 an agent can get wrong honestly — a file that grew between being stat'ed and being read —
 and `size_mismatch` tells a technician something a digest mismatch does not. Either way
@@ -695,7 +720,9 @@ curl http://localhost:8080/plugins/api/agent/v1/me/ -H "Authorization: Bearer $T
 
 # 3. Read the whole configuration for this device
 curl http://localhost:8080/plugins/api/agent/v1/sync/ -H "Authorization: Bearer $TOKEN"
-# -> 200 {"config_version": 5, "device": {...}, "connections": [{... "station_links": [...]}]}
+# -> 200 {"config_version": 5, "limits": {...}, "server": {"adl_version": "0.8.14",
+#         "plugin_version": "0.4.0"}, "device": {...},
+#         "connections": [{... "station_links": [...]}]}
 
 # 4. Point a station link at the folder the files are really in
 curl -X PATCH http://localhost:8080/plugins/api/agent/v1/station-links/1/config/ \
