@@ -330,9 +330,9 @@ delivered months ago — which arrives, is decoded, and becomes observations aga
 
 When a country goes quiet, "no data arrived" is the least useful thing ADL can say. Three
 very different faults produce it, and the fix for each is different: the machine is down,
-the machine is up and its scan loop has wedged, or everything is running and the machine's
-clock is wrong so its file windows are looking in the wrong place. Reverse tunnels could
-never tell these apart, and that is most of what made them expensive to run.
+the machine is up and nothing it does is reaching ADL, or everything is running and the
+machine's clock is wrong so its file windows are looking in the wrong place. Reverse tunnels
+could never tell these apart, and that is most of what made them expensive to run.
 
 So every machine **heartbeats on its own cadence** — five minutes by default, from a loop
 deliberately isolated from the scan cycle, which is the whole trick: a machine whose
@@ -382,11 +382,24 @@ device's own check interval.
 | **Online** | Heartbeats fresh, cycles completing | Nothing to do |
 | **Degraded** | 2 missed heartbeats (~10 min) | The machine or its link is faltering |
 | **Offline** | 3 missed heartbeats (~15 min) | Someone has to go and look at the machine |
-| **Cycle stuck** | Heartbeats fresh, no completed cycle for over 2× the check interval | The service is alive; its work is not |
+| **Cycle stuck** | Heartbeats fresh, and for over 2× the check interval neither a cycle completed nor a file arrived | The service is alive; its work is not |
+
+**Two ways of proving the same thing, because neither works alone.** An idle machine proves
+itself by finishing empty cycles every few minutes and sends nothing at all. A machine
+working through a backlog sends constantly and will not finish a cycle for hours — the agent
+stamps one only once it has been round every station on the box. Reading cycles alone called
+exactly that machine stuck, which is the half of a fleet working hardest.
+
+So *cycle stuck* means **no progress**, not *no completed cycle*: it needs the cycle to be
+stale **and** nothing to have arrived inside the same window. That window is the cycle
+threshold itself — there is no second number to configure.
+
+A machine that is green on arrivals rather than on a completed cycle says so in its own
+sentence, rather than reporting a scan cycle two hours old beside a verdict of "fine".
 
 Silence outranks stuckness, always: a machine that has stopped talking cannot be *observed*
-to be cycling, so it is reported offline rather than stuck. A machine that has never been
-paired has no liveness at all — there may be no machine.
+to be cycling or sending, so it is reported offline rather than stuck. A machine that has
+never been paired has no liveness at all — there may be no machine.
 
 **Clock skew is not a state.** Above five minutes it is shown beside whatever the state is
 and never becomes it, because a skewed machine is usually otherwise fine, and folding it in

@@ -12,8 +12,9 @@ is what HQ has never been able to do with reverse tunnels:
 
 - **offline** -- the machine, its link, or the service is down. Nothing is
   arriving and nothing will until someone goes and looks.
-- **cycle stuck** -- the machine is up and heartbeating, but its scan loop
-  has not completed a pass. The service lives; its work does not.
+- **cycle stuck** -- the machine is up and heartbeating, and nothing it does
+  is reaching ADL: no scan cycle finished and no file arrived. The service
+  lives; its work does not.
 - **clock skewed** -- everything is running, and the file-picking window runs
   on the device's own file times, so a wrong clock quietly loses data. Never
   an outage; always worth saying.
@@ -23,6 +24,12 @@ device (or a connection) already in hand and reads fields already on it, so
 this module is safe to call from a rendering path, from the health checklist,
 and from a test that never saved a row. That is also why ``models`` imports
 *this* and never the other way round.
+
+It is also why the device carries ``last_file_received_at`` at all. The
+record of what ADL holds lives in ``AgentStationDataFile``, and asking it
+would be one query -- which this module may not make. So the upload path
+stamps the device as it stores each file, and the fact arrives here on the
+row like every other.
 """
 
 import os
@@ -381,19 +388,47 @@ def liveness_of(device, now=None):
     # point to measure the absence of a cycle from.
     cycle_age = _age(now, device.last_cycle_completed_at or device.paired_at)
 
-    if cycle_age > stuck_after:
+    # Two ways of proving the same thing, and neither works alone. An idle
+    # machine proves itself by finishing empty cycles every few minutes and
+    # sends nothing at all; a machine pushing a backlog sends constantly and
+    # will not finish a cycle for hours, because the agent stamps a cycle
+    # only when it has been round every station on the box. Reading either
+    # one on its own calls half a healthy fleet stuck -- and the half it
+    # picks on is the half working hardest (wmo-raf/adl#303).
+    arrival_age = _age(now, device.last_file_received_at)
+    arriving = arrival_age is not None and arrival_age <= stuck_after
+
+    if cycle_age > stuck_after and not arriving:
         return reading(
             LivenessState.CYCLE_STUCK,
             (_("%(device)s is heartbeating but has not completed a scan "
-               "cycle since it was paired %(age)s ago; it scans every "
-               "%(interval)s minutes.")
+               "cycle since it was paired %(age)s ago, and nothing has "
+               "arrived from it; it scans every %(interval)s minutes.")
              if device.last_cycle_completed_at is None else
              _("%(device)s is heartbeating but its last completed scan "
-               "cycle was %(age)s ago; it scans every %(interval)s "
-               "minutes.")) % {
+               "cycle was %(age)s ago and nothing has arrived from it "
+               "since; it scans every %(interval)s minutes.")) % {
                 "device": device.name,
                 "age": humanize_seconds(cycle_age.total_seconds()),
                 "interval": device.check_interval_minutes,
+            },
+        )
+
+    # Green on the arrivals rather than on the cycle. Said out loud, because
+    # the ordinary sentence would report a scan cycle hours old next to a
+    # verdict of "fine" and read like an oversight. A backlog is a finding
+    # about a machine that is otherwise working, which is the same reason
+    # clock skew is a note and not a state.
+    if cycle_age > stuck_after:
+        return reading(
+            LivenessState.ONLINE,
+            _("%(device)s is sending files -- the last arrived %(arrived)s "
+              "ago -- but has not finished a scan cycle for %(age)s. That is "
+              "what a machine working through a backlog looks like; it "
+              "finishes a cycle once it has been round every station.") % {
+                "device": device.name,
+                "arrived": humanize_seconds(arrival_age.total_seconds()),
+                "age": humanize_seconds(cycle_age.total_seconds()),
             },
         )
 
