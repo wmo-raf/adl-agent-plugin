@@ -13,7 +13,7 @@ notes** section listing the migrations it ships and anything an operator must do
 This file starts at 0.2.0, which is the first tagged release. Earlier history is
 in the git log.
 
-## [Unreleased]
+## [0.5.0] — 2026-08-27
 
 ### Added
 
@@ -289,7 +289,8 @@ Two settings are worth knowing about, both optional and both defaulted:
 - `ADL_AGENT_RELEASE_MIRROR_ENABLED` (default `false`) — agent release mirroring
   stays off until an instance asks for it.
 
-[Unreleased]: https://github.com/wmo-raf/adl-agent-plugin/compare/0.4.0...HEAD
+[Unreleased]: https://github.com/wmo-raf/adl-agent-plugin/compare/0.5.0...HEAD
+[0.5.0]: https://github.com/wmo-raf/adl-agent-plugin/compare/0.4.0...0.5.0
 [0.4.0]: https://github.com/wmo-raf/adl-agent-plugin/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/wmo-raf/adl-agent-plugin/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/wmo-raf/adl-agent-plugin/releases/tag/0.2.0
