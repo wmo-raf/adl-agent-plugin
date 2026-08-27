@@ -19,7 +19,11 @@ from .health import (
     reconciliation_interval_hours,
     station_stale_after_minutes,
 )
-from .limits import MANIFEST_PAGE_LIMIT, MAX_UPLOAD_BYTES
+from .limits import (
+    MANIFEST_PAGE_LIMIT,
+    MAX_UPLOAD_BYTES,
+    concurrent_uploads,
+)
 from .models import AgentConnection, AgentStationDataFile, AgentStationLink
 
 
@@ -137,6 +141,7 @@ def limits_payload():
     return {
         "manifest_entries": MANIFEST_PAGE_LIMIT,
         "file_bytes": MAX_UPLOAD_BYTES,
+        "concurrent_uploads": concurrent_uploads(),
     }
 
 

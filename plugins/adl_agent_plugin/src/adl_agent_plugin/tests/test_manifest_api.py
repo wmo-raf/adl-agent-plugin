@@ -10,10 +10,14 @@ the entire contract. What the ledger looks like underneath is ADL's business.
 
 from datetime import timedelta
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone as dj_timezone
 
-from adl_agent_plugin.limits import MANIFEST_PAGE_LIMIT
+from adl_agent_plugin.limits import (
+    DEFAULT_CONCURRENT_UPLOADS,
+    MANIFEST_PAGE_LIMIT,
+    MOST_CONCURRENT_UPLOADS,
+)
 from adl_agent_plugin.models import AgentStationDataFile
 
 from .helpers import (
@@ -235,6 +239,52 @@ class ManifestPagingTests(ManifestTestCase):
         limits = self.client.get(SYNC_URL, **bearer(self.token)).json()["limits"]
 
         self.assertEqual(limits["manifest_entries"], MANIFEST_PAGE_LIMIT)
+
+
+class ConcurrentUploadLimitTests(ManifestTestCase):
+    """How many files one machine may have on the wire at once.
+
+    ADL's to set and not the agent's to assume, because the scarce thing is
+    the country's link and this instance's capacity -- neither of which a
+    machine in a vendor's server room can see (wmo-raf/adl#304).
+    """
+
+    def limits(self):
+        return self.client.get(SYNC_URL, **bearer(self.token)).json()["limits"]
+
+    def test_the_bound_is_served_so_an_agent_need_not_guess(self):
+        self.assertEqual(
+            self.limits()["concurrent_uploads"], DEFAULT_CONCURRENT_UPLOADS,
+        )
+
+    @override_settings(ADL_AGENT_CONCURRENT_UPLOADS=8)
+    def test_a_deployment_may_set_it(self):
+        # The whole reason it is served rather than compiled into the agent: a
+        # country on a link that cannot carry four at once turns it down here,
+        # and its fleet follows without anything being reinstalled.
+        self.assertEqual(self.limits()["concurrent_uploads"], 8)
+
+    @override_settings(ADL_AGENT_CONCURRENT_UPLOADS=1000)
+    def test_more_than_this_instance_will_serve_is_clamped(self):
+        self.assertEqual(
+            self.limits()["concurrent_uploads"], MOST_CONCURRENT_UPLOADS,
+        )
+
+    @override_settings(ADL_AGENT_CONCURRENT_UPLOADS=0)
+    def test_zero_is_nonsense_rather_than_a_choice(self):
+        # Unlike the reconciliation interval, where zero is a deployment
+        # saying the sweep costs more than it is worth. A machine that may
+        # upload no files at once is a machine that is not doing anything, so
+        # this is a mistyped number and takes the default.
+        self.assertEqual(
+            self.limits()["concurrent_uploads"], DEFAULT_CONCURRENT_UPLOADS,
+        )
+
+    @override_settings(ADL_AGENT_CONCURRENT_UPLOADS="lots")
+    def test_an_unreadable_number_leaves_the_fleet_uploading(self):
+        self.assertEqual(
+            self.limits()["concurrent_uploads"], DEFAULT_CONCURRENT_UPLOADS,
+        )
 
 
 class ManifestBadRequestTests(ManifestTestCase):
