@@ -39,6 +39,86 @@ in the git log.
   one that predates the field uploads one file at a time, as every agent does today. No
   migration.
 
+- **A machine's collection history, kept.** The heartbeat now carries `completed_passes`:
+  the unit passes that finished on the machine since the last beat ADL accepted. Each
+  station's share of each becomes one row in the new `AgentCyclePass` hypertable — what the
+  pass walked, what it scanned, held, offered, wanted, uploaded and lost, how long it took,
+  why it stopped if it did, and **up to three names of files that were seen and did not
+  arrive**, with their reason.
+
+  Before this ADL held exactly one cycle's worth of what a machine had been doing and
+  overwrote it every five minutes. That is the right shape for liveness — decision #264 said
+  so, and this does not reverse it: beats stay stateless and only transitions are logged.
+  What gets history is the *pass*, which is a different object with a different lifetime.
+
+  The missing-files field is the point of it. ADL already stores the name of every file it
+  received; the names of the ones that were *seen and did not arrive* is where "the vendor
+  renamed its files on the 14th" lives, and it is the difference between "this station is
+  quiet" and "this station is quiet because the files are now called something else". No new
+  privacy exposure, for the same reason.
+
+  Every pass is stored, including the uneventful ones — filtering saves rows only on quiet
+  stations, which are precisely the ones where "the agent looked and there was nothing" is
+  the fact worth having. Time bounds the table instead: a compression policy at 7 days and a
+  retention policy at 90, both settable with `ADL_AGENT_CYCLE_COMPRESS_AFTER_DAYS` and
+  `ADL_AGENT_CYCLE_RETENTION_DAYS` and re-applied nightly so a change to either takes
+  without a migration to hang it on.
+
+  `last_cycle` is **unchanged and stays indefinitely**. Agents auto-update through the
+  release feed; ADL instances are upgraded by a person, per country — so a new agent meeting
+  an old plugin is the normal, long-lived state across twenty-six ministries, and
+  `last_cycle.completed_at` is what `AgentDevice.last_cycle_completed_at` and the
+  `cycle_stuck` check are written from. An agent sending `last_cycle` alone is read as one
+  pass per beat: coarser than a newer one's, and emphatically better than nothing.
+
+  A machine that sheds passes because ADL has been unreachable says how many on its next
+  beat; that is written to this instance's log and shown on the device's page, rather than
+  left as a number the following beat overwrites.
+
+  `StationLinkActivityLog` is untouched and the monitoring activity list gains no rows from
+  this. Ships migrations `0013` and `0014`; see the upgrade notes.
+
+- **"Agent Cycles", a filterable listing.** Machine, station, trigger, outcome and date
+  range — which makes *every pass that went wrong this week, across every device* a question
+  ADL can answer at all; both halves of *wrong* (cut short, and finished having lost files)
+  are covered by one partial index. "Did not arrive" is a column rather than something to
+  open a row for, because it is what brings anybody here, and each name carries what happened
+  to it — a file matching no station's pattern belongs to the folder rather than to the
+  station whose row it appears on, and a bare list of names would let one be read as the
+  other. **Recent cycles** panels on the device and station-link edit pages show the last ten
+  and link into the listing already narrowed.
+
+- **A device's log level, set from ADL.** `AgentDevice.log_level` is sent in the `device`
+  block of `sync` when it is set, and the agent prefers it over whatever the machine itself
+  is configured with. Blank sends nothing, which the agent reads as "use the local setting"
+  — the same reading of silence `reconciliation_interval_hours` and
+  `dated_folder_window_hours` get, so clearing the field gives the machine back to whoever
+  is standing at it.
+
+  Raising a country server to `Debug` otherwise means reaching the machine, which is the
+  exact problem this product exists to solve. Leaving one raised is safe: the agent's log
+  has a fixed size ceiling, so what it costs is how far back the log reaches, not disk.
+  `None` is not offered — a machine told to keep no record is a machine with nothing to show
+  on its next bad day.
+
+  From [wmo-raf/adl#307](https://github.com/wmo-raf/adl/issues/307).
+
+### Upgrade notes
+
+Migrations: `0013_agentdevice_log_level_agentcyclepass`,
+`0014_agentcyclepass_policies`.
+
+`0014` sets a TimescaleDB compression policy and a retention policy on the new hypertable,
+so the deployment must be on the `timescalegis` backend — which it already must be, since
+core's own observation tables are hypertables. Nothing to do before running them: the table
+is new, so there is nothing to migrate into it and nothing that can be lost. An instance
+whose policies could not be set logs the failure and keeps collecting; the nightly
+`run_agent_cycle_policies` task tries again.
+
+Nothing needs to happen to the fleet. Agents that predate `completed_passes` go on sending
+`last_cycle` and are stored one pass per beat; agents that carry it are stored one row per
+station per pass. Neither needs reinstalling.
+
 ## [0.4.0] — 2026-08-27
 
 ### Fixed

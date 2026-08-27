@@ -66,14 +66,29 @@ def device_payload(device):
     setting rather than the row -- see ``health.reconciliation_interval_hours``
     for why it is a policy and not a field. Sent even when it is zero, since
     to an agent an absent key means "reconcile daily" and zero means "never".
+
+    ``log_level`` is the one field here that is usually absent. It is how much
+    the machine should write to its own log, and ADL only has an opinion when
+    somebody has set one: absent means "use whatever the machine was set to
+    locally", the same reading of silence the two cadences above get. Raising
+    a country server to Debug otherwise means reaching the machine, which is
+    the problem this product exists to solve (wmo-raf/adl#307). Left out
+    rather than sent empty so that clearing the field in the admin and an ADL
+    that predates it look identical to the agent -- they are the same
+    instruction.
     """
-    return {
+    payload = {
         **device_summary(device),
         "check_interval_minutes": device.check_interval_minutes,
         "heartbeat_interval_minutes": heartbeat_interval_minutes(),
         "dated_folder_window_hours": device.dated_folder_window_hours,
         "reconciliation_interval_hours": reconciliation_interval_hours(),
     }
+
+    if device.log_level:
+        payload["log_level"] = device.log_level
+
+    return payload
 
 
 def station_link_payload(station_link, reoffer_point=None, last_received_at=None):

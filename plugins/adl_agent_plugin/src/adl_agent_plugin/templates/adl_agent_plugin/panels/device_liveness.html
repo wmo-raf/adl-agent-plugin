@@ -64,6 +64,20 @@
             <th scope="row">{% trans "Files waiting to be sent" %}</th>
             <td>{{ backlog_count|default_if_none:"—" }}</td>
         </tr>
+        {% if dropped_passes %}
+            {% comment %}
+                Only when there are some. This machine was unable to reach
+                ADL for longer than its queue is deep, so there is a gap in
+                the Agent Cycles history that nothing else here accounts for
+                — and a gap nobody can explain reads as a machine that
+                stopped. Nothing is actually lost: the passes are in the
+                machine's own cycle log.
+            {% endcomment %}
+            <tr>
+                <th scope="row">{% trans "Collection passes never received" %}</th>
+                <td>{{ dropped_passes }}</td>
+            </tr>
+        {% endif %}
     </tbody>
 </table>
 

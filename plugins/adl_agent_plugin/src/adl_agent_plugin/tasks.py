@@ -1,14 +1,16 @@
 """
 When the agent plugin's own work happens.
 
-Three things run on a clock here. The **fleet sweep** is the one that exists
+Four things run on a clock here. The **fleet sweep** is the one that exists
 purely because of what does *not* happen: an offline machine sends no
-request, so noticing its silence has to be ADL's own initiative. The other
-two pull in opposite directions -- the
-**nudge** makes a drain happen sooner than the schedule would, because a
-machine that has just uploaded has told ADL there is work. The nightly
-**retention sweep** lets staged bytes go once nobody needs them any more; what
-it prunes and what it must never touch is in ``retention``.
+request, so noticing its silence has to be ADL's own initiative. The
+**nudge** pulls the other way: it makes a drain happen sooner than the
+schedule would, because a machine that has just uploaded has told ADL there
+is work. The nightly **retention sweep** lets staged bytes go once nobody
+needs them any more; what it prunes and what it must never touch is in
+``retention``. And the nightly **cycle policies** keep the collection-history
+table compressing and expiring where this deployment's settings say --
+see ``cycles``.
 
 Draining without waiting for the clock
 --------------------------------------
@@ -52,6 +54,7 @@ from .fleet import (
     publish_source_evidence,
     sweep_liveness,
 )
+from .cycles import apply_policies as apply_cycle_policies
 from .mirror import mirror_releases
 from .retention import prune_expired_files
 
@@ -185,6 +188,24 @@ def run_agent_file_retention(self):
 
 
 @app.task(base=Singleton, bind=True)
+def run_agent_cycle_policies(self):
+    """Keep the cycle-pass table's compression and retention where the
+    settings say.
+
+    The policies are set once by a migration, with whatever the instance was
+    configured with that day. They are settings, though, so an operator who
+    changes one has to be able to see it take -- and there is no migration to
+    hang that on. Re-applying them nightly is the cheapest honest answer: two
+    statements against a catalogue, on a table that is already being
+    maintained by the same background workers.
+
+    Idempotent and quiet in the ordinary case, which is every night nobody
+    changed anything.
+    """
+    apply_cycle_policies()
+
+
+@app.task(base=Singleton, bind=True)
 def run_agent_release_mirror(self):
     """Pull any new agent release from upstream into this instance.
 
@@ -246,6 +267,15 @@ def setup_periodic_tasks(sender, **kwargs):
         crontab(hour=1, minute=20),
         run_agent_release_mirror.s(),
         name="run-agent-release-mirror-daily",
+    )
+
+    # Behind the other three, in the same quiet window. Nothing waits on it
+    # -- the policies from the migration stand until it runs -- and it is two
+    # catalogue statements, so where in the hour it sits does not matter.
+    sender.add_periodic_task(
+        crontab(hour=1, minute=30),
+        run_agent_cycle_policies.s(),
+        name="run-agent-cycle-policies-daily",
     )
 
     sender.add_periodic_task(
