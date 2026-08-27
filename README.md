@@ -154,7 +154,7 @@ So the floor is the collection start date, and what the ledger contributes is th
 pull it back **down**: to the oldest file this link is waiting to be offered again. A
 request to re-send a file nobody would be asked for is not a request at all.
 
-**Limits**, both stated in every `sync` and `manifest` response under `limits` so a fleet
+**Limits**, all stated in every `sync` and `manifest` response under `limits` so a fleet
 in the field follows a change without being reinstalled:
 
 - `manifest_entries` — 500 candidate files per call. A longer manifest is **refused**, not
@@ -162,6 +162,14 @@ in the field follows a change without being reinstalled:
   silence about the rest for "already held" and never offer them again. The agent pages.
 - `file_bytes` — 50 MB per file, after decompression, enforced as the bytes arrive rather
   than measured afterwards.
+- `concurrent_uploads` — 4 files on the wire at once, across every station a machine
+  serves. The only one of the three that is a tuning knob, and the only one an operator may
+  set (`ADL_AGENT_CONCURRENT_UPLOADS`): three thousand files of backfill sent one round
+  trip at a time is the difference between a station catching up this morning and catching
+  up this week, and the round trip is nearly all waiting — but the link belongs to the
+  whole met service, and how much of it an agent may take is not a question a machine in a
+  vendor's server room can answer. Clamped to 32 here and again on the agent's own side.
+  An agent that predates the field uploads one at a time.
 
 **Verification.** The declared size is checked as well as the hash, because size is the one
 an agent can get wrong honestly — a file that grew between being stat'ed and being read —

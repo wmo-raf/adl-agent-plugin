@@ -13,6 +13,32 @@ notes** section listing the migrations it ships and anything an operator must do
 This file starts at 0.2.0, which is the first tagged release. Earlier history is
 in the git log.
 
+## [Unreleased]
+
+### Added
+
+- **Upload concurrency, per deployment.** The `limits` block of `sync` -- and of every
+  `manifest` response beside it -- now carries `concurrent_uploads`: how many files one
+  machine may have on the wire at once, across every station it serves. Four by default;
+  set with `ADL_AGENT_CONCURRENT_UPLOADS` (Django settings or the environment), clamped to
+  32 here and again on the agent's own side.
+
+  The only one of the three limits that is a tuning knob rather than a guard. The other two
+  exist so that one machine having a bad day cannot take the instance with it; this one is
+  a judgement about the country's link and this instance's capacity, and neither is visible
+  from the vendor's server room where the machine sits. Three thousand files of backfill
+  sent one round trip at a time is the difference between a station catching up this
+  morning and catching up this week -- and the link belongs to the whole met service.
+
+  Zero is nonsense rather than a choice, unlike the reconciliation interval: a machine that
+  may upload no files at once is a machine that is not doing anything, so it takes the
+  default, as does anything unreadable. A deployment that mistypes it keeps its fleet
+  uploading.
+
+  Read by the agent from [wmo-raf/adl#304](https://github.com/wmo-raf/adl/issues/304);
+  one that predates the field uploads one file at a time, as every agent does today. No
+  migration.
+
 ## [0.4.0] — 2026-08-27
 
 ### Fixed
