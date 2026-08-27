@@ -5,7 +5,29 @@ from setuptools import find_packages, setup
 
 PROJECT_DIR = os.path.dirname(__file__)
 REQUIREMENTS_DIR = os.path.join(PROJECT_DIR, "requirements")
-VERSION = "0.4.0"
+VERSION_FILE = os.path.join(PROJECT_DIR, "src", "adl_agent_plugin", "version.py")
+
+
+def get_version():
+    """Read the version out of the package rather than restating it here.
+
+    Executed rather than imported: at build time the package's dependencies
+    are not installed yet, so importing ``adl_agent_plugin`` would fail on
+    its Django imports. ``version.py`` holds nothing but a docstring and two
+    assignments, which is what makes that safe.
+
+    The point of reading it at all is that the packaged version and the
+    version an agent is told over the wire come from one line of one file.
+    """
+    namespace = {}
+
+    with open(VERSION_FILE) as fp:
+        exec(fp.read(), namespace)
+
+    return namespace["VERSION"]
+
+
+VERSION = get_version()
 
 
 def get_requirements(env):

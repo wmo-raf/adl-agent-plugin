@@ -12,6 +12,7 @@ The wire form of a station link's own tier is built by the model
 beside the field's definition. This module assembles the rest.
 """
 
+from adl import __version__ as adl_version
 from django.utils import timezone as dj_timezone
 
 from .health import (
@@ -25,6 +26,7 @@ from .limits import (
     concurrent_uploads,
 )
 from .models import AgentConnection, AgentStationDataFile, AgentStationLink
+from .version import VERSION
 
 
 def device_summary(device):
@@ -145,6 +147,32 @@ def limits_payload():
     }
 
 
+def server_payload():
+    """What this instance is running.
+
+    Top-level in the sync response rather than inside ``device``, because it
+    describes the instance and not the machine that asked. Every device on
+    this ADL gets the same two strings.
+
+    On the sync response and not the heartbeat, deliberately, and against the
+    precedent ``reconciliation_interval_hours`` sets by riding both. A sync
+    response is written to the agent's offline cache byte for byte and
+    re-fetched in full every cycle, so these two survive a service restart
+    and still read correctly on a machine that cannot currently reach here.
+    What an agent keeps from a heartbeat it keeps in memory -- which would
+    leave the version blank after every restart, and blank for ever on an
+    unreachable machine, which is exactly when somebody is looking at it.
+
+    Nothing downstream depends on these: an agent that does not understand
+    the block ignores it, and an agent that does shows the two numbers and
+    changes no behaviour on them. They exist to be read by a person.
+    """
+    return {
+        "adl_version": adl_version,
+        "plugin_version": VERSION,
+    }
+
+
 def sync_payload(device):
     """Everything this device needs for a cycle, in one response.
 
@@ -171,6 +199,7 @@ def sync_payload(device):
     return {
         "config_version": device.current_config_version(),
         "limits": limits_payload(),
+        "server": server_payload(),
         "device": device_payload(device),
         "connections": [
             connection_payload(
