@@ -359,6 +359,7 @@ def _pass(raw, index):
         )
 
     where = "completed_passes[%s]" % index
+    stopped = _text(raw.get("stopped"), f"{where}.stopped", 500)
 
     return CyclePass(
         at=_moment(raw.get("at"), f"{where}.at"),
@@ -368,8 +369,9 @@ def _pass(raw, index):
         # inventing a fact.
         unit=_text(raw.get("unit"), f"{where}.unit", 500),
         trigger=_word(raw.get("trigger"), f"{where}.trigger", PASS_TRIGGERS),
-        completed=_flag(raw.get("completed"), f"{where}.completed"),
-        stopped=_text(raw.get("stopped"), f"{where}.stopped", 500),
+        completed=_completed(raw.get("completed"), f"{where}.completed",
+                             stopped),
+        stopped=stopped,
         folders=_count(raw.get("folders"), f"{where}.folders"),
         stations=_pass_stations(raw.get("stations"), where),
         missing=_missing(raw.get("missing"), where),
@@ -473,10 +475,19 @@ def _missing(value, where):
     return tuple(files)
 
 
-def _flag(value, field_name):
-    """A yes or a no, or ``False`` when nothing was reported."""
+def _completed(value, field_name, stopped):
+    """Whether the pass ran to its end.
+
+    Read together with the reason it stopped, because the two are one fact in
+    two parts and the agent builds them as one: a pass marked finished with a
+    reason for stopping, or cut short with none, is a record that contradicts
+    itself. So an agent that omits the flag is read by the sentence beside it
+    rather than defaulted -- a plain ``False`` would file every such pass
+    under "cut short", which is the listing an operator opens to find the
+    machines in trouble.
+    """
     if value is None:
-        return False
+        return not stopped
 
     if not isinstance(value, bool):
         raise _invalid(
@@ -514,6 +525,46 @@ def _word(value, field_name, vocabulary):
     text = _text(value, field_name, 50)
 
     return text if text in vocabulary else ""
+
+
+def passes_from_last_cycle(beat, now):
+    """One pass, built from the rolling snapshot an old agent sends.
+
+    What an agent too old to have :attr:`Heartbeat.passes` sends instead, read
+    as the coarsest honest history: the counts are real and the gaps are the
+    beats. An operator who upgrades ADL before the fleet has caught up should
+    see a coarser history, not an empty one.
+
+    Deliberately not deduplicated. A machine beating every five minutes on a
+    ten-minute cycle sends the same snapshot twice, and this stores the same
+    counts twice -- which is what "one pass per beat" means, and is the honest
+    reading of what arrived.
+
+    The unit is blank because an old agent does not say which folder its
+    counts came from, and the trigger with it: neither is a fact ADL has.
+    """
+    if not beat.links:
+        return ()
+
+    return (
+        CyclePass(
+            at=beat.last_cycle_completed_at or now,
+            unit="",
+            trigger="",
+            completed=True,
+            stations=tuple(
+                {
+                    "station_link_id": link["station_link_id"],
+                    "scanned": link.get("scanned"),
+                    "offered": link.get("offered"),
+                    "uploaded": link.get("uploaded"),
+                    "failed": link.get("failed"),
+                    "error": link.get("error") or "",
+                }
+                for link in beat.links
+            ),
+        ),
+    )
 
 
 def _volumes(value):

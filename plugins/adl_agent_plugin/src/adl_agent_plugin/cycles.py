@@ -40,6 +40,7 @@ from django.conf import settings
 from django.db import connection, transaction
 from django.utils import timezone as dj_timezone
 
+from .heartbeat import passes_from_last_cycle
 from .models import AgentCyclePass, AgentStationLink
 
 logger = logging.getLogger(__name__)
@@ -164,14 +165,27 @@ def record_passes(device, beat, now=None):
     """
     now = now or dj_timezone.now()
 
+    if beat.dropped_passes:
+        # Said out loud, and not only stashed on the device: the beat that
+        # reports a gap is the beat that clears it, so a fortnight later the
+        # column would say nothing and the gap in the history would look like
+        # a machine that had stopped. The passes themselves are not lost --
+        # the machine's own cycle log keeps every one of them.
+        logger.warning(
+            "%s was out of touch long enough to drop %s finished collection "
+            "pass(es) before this heartbeat; they are still in that "
+            "machine's own log.",
+            device.name, beat.dropped_passes,
+        )
+
     passes = beat.passes
 
     if passes is None:
         # An agent too old to have the field at all. What it sends instead is
-        # the rolling snapshot, and one pass per beat out of it is a coarser
-        # history than a newer agent's but is emphatically better than none:
-        # the counts are real, and the gaps are the beats.
-        passes = _from_last_cycle(beat, now)
+        # the rolling snapshot, read as one pass per beat -- see
+        # :func:`adl_agent_plugin.heartbeat.passes_from_last_cycle`, which
+        # lives beside the reader whose silence triggers it.
+        passes = passes_from_last_cycle(beat, now)
 
     if not passes:
         return []
@@ -263,42 +277,3 @@ def _missing_for(missing, station_link_id):
         file for file in missing
         if file.get("station_link_id") in (None, station_link_id)
     ]
-
-
-def _from_last_cycle(beat, now):
-    """One pass, built from the rolling snapshot an old agent sends.
-
-    Deliberately coarse and deliberately not deduplicated. A machine beating
-    every five minutes on a ten-minute cycle sends the same snapshot twice, so
-    this stores the same counts twice -- which is the honest reading of what
-    arrived, and is what "one pass per beat" means. What it must not do is
-    refuse the beat or store nothing: an operator upgrading ADL before the
-    fleet has caught up should see a coarser history, not an empty one.
-
-    The unit is blank because an old agent does not say which folder its
-    counts came from, and the trigger with it: neither is a fact ADL has.
-    """
-    from .heartbeat import CyclePass
-
-    if not beat.links:
-        return ()
-
-    return (
-        CyclePass(
-            at=beat.last_cycle_completed_at or now,
-            unit="",
-            trigger="",
-            completed=True,
-            stations=tuple(
-                {
-                    "station_link_id": link["station_link_id"],
-                    "scanned": link.get("scanned"),
-                    "offered": link.get("offered"),
-                    "uploaded": link.get("uploaded"),
-                    "failed": link.get("failed"),
-                    "error": link.get("error") or "",
-                }
-                for link in beat.links
-            ),
-        ),
-    )

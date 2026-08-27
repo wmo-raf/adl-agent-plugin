@@ -141,14 +141,16 @@ class CyclePassStorageTests(CyclePassTestCase):
             [file["name"] for file in stored.missing_files],
             ["BOBO_20260819.dat", "BOBO_20260821.DAT"],
         )
+        # And what happened to each, beside the name. A unit is a folder
+        # group, so an unmatched file travels on every station's row -- and a
+        # bare list of names would let an operator read the folder's problem
+        # as this station's.
         self.assertEqual(
             stored.missing_summary(),
-            "BOBO_20260819.dat, BOBO_20260821.DAT",
+            "BOBO_20260819.dat (failed), "
+            "BOBO_20260821.DAT (matches no station)",
         )
 
-        # The unmatched one belongs to no station, which is exactly what makes
-        # it invisible to every other number in this product -- so it travels
-        # on every station of the unit rather than none.
         self.assertIsNone(stored.missing_files[1]["station_link_id"])
 
     def test_another_stations_failure_does_not_appear_on_this_ones_row(self):
@@ -187,6 +189,25 @@ class CyclePassStorageTests(CyclePassTestCase):
         self.assertIn("stopped answering", stored.stopped)
         self.assertEqual(stored.outcome, AgentCyclePassOutcome.CUT_SHORT)
 
+    def test_a_pass_that_omits_completed_is_read_by_the_reason_beside_it(self):
+        """Two parts of one fact, read together.
+
+        A plain False would file a pass whose agent simply omitted the flag
+        under "cut short" -- which is the listing an operator opens to find
+        the machines in trouble.
+        """
+        self.heartbeat({"completed_passes": [
+            self.one_pass(unit="C:\\a", completed=None),
+            self.one_pass(unit="C:\\b", completed=None,
+                          stopped="ADL stopped answering."),
+        ]})
+
+        finished = AgentCyclePass.objects.get(unit="C:\\a")
+        stopped = AgentCyclePass.objects.get(unit="C:\\b")
+
+        self.assertTrue(finished.completed)
+        self.assertFalse(stopped.completed)
+
     def test_a_station_this_ADL_does_not_know_is_dropped_not_refused(self):
         """A machine collecting a station HQ unlinked an hour ago is a
         machine doing what it was told, not one to argue with."""
@@ -199,6 +220,21 @@ class CyclePassStorageTests(CyclePassTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(AgentCyclePass.objects.count(), 1)
+
+    def test_a_machine_cannot_write_history_for_another_machines_station(self):
+        """"What is mine" is a question about the device, and it is asked of
+        the device rather than of whatever arrived in the body."""
+        elsewhere, _token = paired_device(name="Ouagadougou server")
+        theirs = create_station_link(
+            connection=create_connection(device=elsewhere),
+        )
+
+        response = self.heartbeat({"completed_passes": [self.one_pass(
+            stations=[{"station_link_id": theirs.pk, "scanned": 40}],
+        )]})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(AgentCyclePass.objects.count(), 0)
 
     def test_a_quiet_pass_is_stored_too(self):
         """Filtering saves rows only on quiet stations -- which are precisely
@@ -252,6 +288,18 @@ class CyclePassStorageTests(CyclePassTestCase):
 
         self.assertEqual(self.device.heartbeat_details["dropped_passes"], 41)
 
+    def test_the_shedding_is_said_out_loud_as_well_as_stored(self):
+        """The beat that reports a gap is the beat that clears it, so the
+        stored number is gone in five minutes. The log line is not."""
+        with self.assertLogs("adl_agent_plugin.cycles", "WARNING") as logs:
+            self.heartbeat({
+                "completed_passes": [self.one_pass()],
+                "dropped_passes": 41,
+            })
+
+        self.assertIn("drop 41 finished collection pass", logs.output[0])
+        self.assertIn(self.device.name, logs.output[0])
+
     def test_a_table_that_will_not_take_a_write_does_not_cost_liveness(self):
         """A beat's first job is to say the machine is alive.
 
@@ -271,6 +319,61 @@ class CyclePassStorageTests(CyclePassTestCase):
         self.device.refresh_from_db()
 
         self.assertIsNotNone(self.device.last_heartbeat_at)
+
+
+class OutcomeTests(CyclePassTestCase):
+    """The word a pass is filed under exists twice, necessarily.
+
+    A derived value cannot be filtered on and a ``Q`` cannot be evaluated in
+    memory, so there is a cascade over a loaded row and a query over the
+    table. They are kept in one place; this is what keeps them agreeing.
+    """
+
+    def test_the_cascade_and_the_query_pick_the_same_word_for_every_row(self):
+        # One of every shape a pass comes in, including the tri-state a
+        # machine that reported no counts leaves behind.
+        for unit, station, completed in [
+            ("delivered", {"uploaded": 5, "failed": 0}, True),
+            ("failed", {"uploaded": 4, "failed": 1}, True),
+            ("quiet", {"uploaded": 0, "failed": 0}, True),
+            ("silent", {}, True),
+            ("cut-short", {"uploaded": 1, "failed": 0}, False),
+            ("cut-short-quiet", {}, False),
+        ]:
+            self.heartbeat({"completed_passes": [self.one_pass(
+                unit=unit,
+                completed=completed,
+                stopped="" if completed else "ADL stopped answering.",
+                stations=[{
+                    "station_link_id": self.station_link.pk, **station,
+                }],
+            )]})
+
+        rows = list(AgentCyclePass.objects.all())
+
+        self.assertEqual(len(rows), 6)
+
+        for outcome, query in AgentCyclePassOutcome.QUERIES.items():
+            self.assertEqual(
+                set(AgentCyclePass.objects.filter(query).values_list(
+                    "unit", flat=True)),
+                {row.unit for row in rows if row.outcome == outcome},
+                msg=f"the two spellings of {outcome} disagree",
+            )
+
+    def test_every_row_matches_exactly_one_outcome(self):
+        """Otherwise the four filters do not partition the listing, and a row
+        is either invisible or shown twice."""
+        self.heartbeat({"completed_passes": [self.one_pass()]})
+
+        row = AgentCyclePass.objects.get()
+        matched = [
+            outcome
+            for outcome, query in AgentCyclePassOutcome.QUERIES.items()
+            if AgentCyclePass.objects.filter(query, pk=row.pk).exists()
+        ]
+
+        self.assertEqual(matched, [row.outcome])
 
 
 class OldAgentTests(CyclePassTestCase):

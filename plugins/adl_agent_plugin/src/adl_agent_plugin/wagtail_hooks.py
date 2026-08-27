@@ -1,5 +1,4 @@
 import django_filters
-from django.db.models import Q
 from django.urls import path
 from django.utils.translation import gettext_lazy as _
 from wagtail import hooks
@@ -96,30 +95,6 @@ class AgentStationDataFileViewSet(SnippetViewSet):
 register_snippet(AgentStationDataFileViewSet)
 
 
-#: How each outcome is asked for in SQL. The property on the model reads the
-#: same three columns in the same order; these are the query form of it,
-#: written beside the listing that needs them so that a filter and the label
-#: beside it cannot come to mean different things.
-#:
-#: ``failed`` is checked before ``uploaded`` for the reason the model checks
-#: it first: a pass that sent nine files and lost one is a pass somebody needs
-#: to look at, and calling it delivered would hide exactly the row worth
-#: seeing.
-CYCLE_PASS_OUTCOME_QUERIES = {
-    AgentCyclePassOutcome.CUT_SHORT: Q(completed=False),
-    AgentCyclePassOutcome.FAILED: Q(completed=True, failed__gt=0),
-    AgentCyclePassOutcome.DELIVERED: (
-        Q(completed=True, uploaded__gt=0)
-        & (Q(failed=0) | Q(failed__isnull=True))
-    ),
-    AgentCyclePassOutcome.QUIET: (
-        Q(completed=True)
-        & (Q(failed=0) | Q(failed__isnull=True))
-        & (Q(uploaded=0) | Q(uploaded__isnull=True))
-    ),
-}
-
-
 class AgentCyclePassFilterSet(WagtailFilterSet):
     """The four questions anybody actually brings to this listing.
 
@@ -140,8 +115,14 @@ class AgentCyclePassFilterSet(WagtailFilterSet):
     )
 
     def filter_outcome(self, queryset, name, value):
-        """Ask for a derived word as a query over the columns behind it."""
-        query = CYCLE_PASS_OUTCOME_QUERIES.get(value)
+        """Ask for a derived word as a query over the columns behind it.
+
+        The query lives beside the cascade it mirrors, in
+        ``AgentCyclePassOutcome`` -- a derived value cannot be filtered on, so
+        the word necessarily exists twice, and the two spellings are kept
+        together rather than a file apart.
+        """
+        query = AgentCyclePassOutcome.QUERIES.get(value)
 
         return queryset if query is None else queryset.filter(query)
 

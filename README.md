@@ -525,8 +525,15 @@ single country's stations, not the fleet's.
 | `ADL_AGENT_CYCLE_RETENTION_DAYS`      | `90`    | When a chunk is dropped                         |
 
 The listing is filterable by machine, station, trigger, outcome and date — which makes
-*every failed pass this week, across every device* a question ADL can answer at all, and it
-could not before. **Recent cycles** panels on the device and station-link pages show the
+*every pass that went wrong this week, across every device* a question ADL can answer at
+all, and it could not before. Both halves of *wrong* are indexed together: a pass cut short,
+and a pass that finished having lost files.
+
+A machine that could not reach ADL for longer than its queue is deep sheds the oldest passes
+to make room, and says how many on its next beat. That is a gap in the history, so it is
+written to this instance's log and shown on the device's page rather than left as a number
+the following beat overwrites — and nothing is actually lost, because the machine's own cycle
+log keeps every pass regardless. **Recent cycles** panels on the device and station-link pages show the
 last ten and link into it already narrowed, so you arrive from whatever you were looking at.
 
 `StationLinkActivityLog` is untouched by any of this, deliberately. Its semantics are an

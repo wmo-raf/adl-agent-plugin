@@ -46,7 +46,7 @@ class Migration(migrations.Migration):
                 'verbose_name_plural': 'Agent Cycle Passes',
                 'ordering': ['-time'],
                 'get_latest_by': 'time',
-                'indexes': [models.Index(fields=['station_link', 'time'], name='idx_agentpass_link_time'), models.Index(fields=['device', 'time'], name='idx_agentpass_device_time'), models.Index(condition=models.Q(('completed', False)), fields=['time'], name='idx_agentpass_cutshort')],
+                'indexes': [models.Index(fields=['station_link', 'time'], name='idx_agentpass_link_time'), models.Index(fields=['device', 'time'], name='idx_agentpass_device_time'), models.Index(condition=models.Q(('completed', False), ('failed__gt', 0), _connector='OR'), fields=['time'], name='idx_agentpass_wrong')],
             },
         ),
     ]

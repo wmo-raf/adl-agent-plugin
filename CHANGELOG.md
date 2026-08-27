@@ -71,14 +71,22 @@ in the git log.
   `cycle_stuck` check are written from. An agent sending `last_cycle` alone is read as one
   pass per beat: coarser than a newer one's, and emphatically better than nothing.
 
+  A machine that sheds passes because ADL has been unreachable says how many on its next
+  beat; that is written to this instance's log and shown on the device's page, rather than
+  left as a number the following beat overwrites.
+
   `StationLinkActivityLog` is untouched and the monitoring activity list gains no rows from
   this. Ships migrations `0013` and `0014`; see the upgrade notes.
 
 - **"Agent Cycles", a filterable listing.** Machine, station, trigger, outcome and date
-  range — which makes *every failed pass this week, across every device* a question ADL can
-  answer at all. "Did not arrive" is a column rather than something to open a row for,
-  because it is what brings anybody here. **Recent cycles** panels on the device and
-  station-link edit pages show the last ten and link into the listing already narrowed.
+  range — which makes *every pass that went wrong this week, across every device* a question
+  ADL can answer at all; both halves of *wrong* (cut short, and finished having lost files)
+  are covered by one partial index. "Did not arrive" is a column rather than something to
+  open a row for, because it is what brings anybody here, and each name carries what happened
+  to it — a file matching no station's pattern belongs to the folder rather than to the
+  station whose row it appears on, and a bare list of names would let one be read as the
+  other. **Recent cycles** panels on the device and station-link edit pages show the last ten
+  and link into the listing already narrowed.
 
 - **A device's log level, set from ADL.** `AgentDevice.log_level` is sent in the `device`
   block of `sync` when it is set, and the agent prefers it over whatever the machine itself

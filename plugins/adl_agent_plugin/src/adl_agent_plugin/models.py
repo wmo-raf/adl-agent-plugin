@@ -2148,11 +2148,18 @@ class AgentCyclePass(TimescaleModel):
     )
 
     #: Up to a few names of files this pass saw and ADL never received, each
-    #: with its outcome and reason. About a hundred bytes, and the point of
-    #: the whole model: ADL already stores the name of every file it *did*
-    #: receive, and this is the negative space -- held as partial, failed to
-    #: upload, or sitting in the folder matching nobody's pattern. There is no
-    #: new privacy exposure in it for the same reason.
+    #: with its outcome and reason. The point of the whole model: ADL already
+    #: stores the name of every file it *did* receive, and this is the
+    #: negative space -- held as partial, failed to upload, or sitting in the
+    #: folder matching nobody's pattern. There is no new privacy exposure in
+    #: it for the same reason.
+    #:
+    #: A hundred bytes or so per row, and a unit-level file -- one matching no
+    #: station's pattern -- is repeated on every station of its unit, because
+    #: there is no unit row to hang it on and the reader's question is always
+    #: about a station. On a forty-station dump folder that is forty copies of
+    #: three names; they are identical strings in adjacent rows, which is the
+    #: shape the columnar compression is best at.
     missing_files = models.JSONField(
         default=list, blank=True, verbose_name=_("Files That Did Not Arrive"),
     )
@@ -2175,10 +2182,13 @@ class AgentCyclePass(TimescaleModel):
             # "this machine's day".
             models.Index(fields=["device", "time"],
                          name="idx_agentpass_device_time"),
-            # "every failed pass this week, across every machine" -- the
-            # fleet-wide question nobody could ask at all before this.
-            models.Index(fields=["time"], name="idx_agentpass_cutshort",
-                         condition=Q(completed=False)),
+            # "every pass that went wrong this week, across every machine" --
+            # the fleet-wide question nobody could ask at all before this.
+            # Both halves of wrong: a pass cut short, and a pass that
+            # finished having lost files. An index over only the first would
+            # leave the commoner of the two questions scanning the table.
+            models.Index(fields=["time"], name="idx_agentpass_wrong",
+                         condition=Q(completed=False) | Q(failed__gt=0)),
         ]
 
     def __str__(self):
@@ -2207,19 +2217,35 @@ class AgentCyclePass(TimescaleModel):
 
     outcome_label.short_description = _("Outcome")
 
+    #: How each outcome reads beside a filename. Short because it shares a
+    #: table cell with the name, and there because of a misreading the agent's
+    #: own passes window had to be fixed for: a unit is a folder group, and a
+    #: file that matches nobody's pattern belongs to no station in it -- so it
+    #: travels on every station's row, and an operator reading a bare list of
+    #: names would take another station's problem, or the folder's, for this
+    #: station's.
+    MISSING_LABELS = {
+        "failed": _("failed"),
+        "held": _("still being written"),
+        "unmatched": _("matches no station"),
+    }
+
     def missing_summary(self):
-        """The names of what did not arrive, short enough for a listing.
+        """What did not arrive, short enough for a listing.
 
         The column an operator scans for the answer to "why has this station
         gone quiet", which is why it is a column and not something to open a
-        row for.
+        row for. The reason itself is on the inspect page; what is here is the
+        name and what happened to it, which is what makes the two cases the
+        column exists for distinguishable at a glance.
         """
-        names = [
-            file.get("name") for file in (self.missing_files or [])
+        return ", ".join(
+            "%s (%s)" % (file["name"], self.MISSING_LABELS[file["outcome"]])
+            if file.get("outcome") in self.MISSING_LABELS
+            else file["name"]
+            for file in (self.missing_files or [])
             if isinstance(file, dict) and file.get("name")
-        ]
-
-        return ", ".join(names)
+        )
 
     missing_summary.short_description = _("Did Not Arrive")
 
@@ -2229,8 +2255,14 @@ class AgentCyclePassOutcome:
 
     Not a model field and not a ``TextChoices``: these are read off columns
     the machine reported, so storing them would be storing a second opinion
-    about facts the row already holds. The labels live here so the listing and
-    the filter cannot spell them differently.
+    about facts the row already holds.
+
+    The word exists twice, necessarily -- once as a cascade over a loaded row
+    (:meth:`AgentCyclePass.outcome`) and once as a query the listing filters
+    with (:attr:`QUERIES`) -- because a derived value cannot be filtered on
+    and a ``Q`` cannot be evaluated in memory. They are kept in one place so
+    that adding an outcome is one edit rather than a hunt, and
+    ``test_cycle_passes`` asserts the two agree row by row.
     """
 
     DELIVERED = "delivered"
@@ -2246,6 +2278,28 @@ class AgentCyclePassOutcome:
     }
 
     CHOICES = list(LABELS.items())
+
+    #: ``failed`` is asked before ``uploaded`` for the reason the cascade
+    #: checks it first: a pass that sent nine files and lost one is a pass
+    #: somebody needs to look at, and calling it delivered would hide exactly
+    #: the row worth seeing.
+    #:
+    #: The two "no failures" clauses spell the tri-state out because they have
+    #: to: NULL is a machine that did not say, and ``failed=0`` alone would
+    #: quietly exclude every pass from an agent that reports no counts.
+    QUERIES = {
+        CUT_SHORT: Q(completed=False),
+        FAILED: Q(completed=True, failed__gt=0),
+        DELIVERED: (
+            Q(completed=True, uploaded__gt=0)
+            & (Q(failed=0) | Q(failed__isnull=True))
+        ),
+        QUIET: (
+            Q(completed=True)
+            & (Q(failed=0) | Q(failed__isnull=True))
+            & (Q(uploaded=0) | Q(uploaded__isnull=True))
+        ),
+    }
 
 
 class AgentStationLinkVariableMapping(Orderable):
