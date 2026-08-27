@@ -248,6 +248,21 @@ class AgentDevice(models.Model):
         null=True, blank=True, editable=False,
         verbose_name=_("Last cycle completed at"),
     )
+    #: When ADL last took delivery of a file from this machine. The second
+    #: half of "is this machine working?", and the half a completed cycle
+    #: cannot answer: a machine pushing a backlog is working hard and will
+    #: not finish a cycle for hours, while an idle machine finishes one every
+    #: few minutes and sends nothing. Read together in :func:`liveness_of`.
+    #:
+    #: Denormalised from ``AgentStationDataFile.received_at`` -- which is
+    #: still the record, and still what the sync response serves per station
+    #: -- because the health module may not query. Stamped by
+    #: :meth:`AgentStationDataFile.record_upload`, so it cannot be written
+    #: without a file having been stored.
+    last_file_received_at = models.DateTimeField(
+        null=True, blank=True, editable=False,
+        verbose_name=_("Last file received at"),
+    )
     #: Uptime, backlog, per-station cycle counts and free disk -- everything
     #: an operator reads on the device's page and nothing the ladder sorts on.
     heartbeat_details = models.JSONField(
@@ -1586,7 +1601,33 @@ class AgentStationDataFile(models.Model):
                 storage = data_file.file.storage
                 transaction.on_commit(lambda: storage.delete(superseded))
 
+        # Outside the block above on purpose. That transaction holds a row
+        # lock across a write to storage, which may be a bucket on the other
+        # side of the country; a device stamp taken inside it would put every
+        # upload from this machine behind the slowest of those writes.
+        cls.stamp_device(station_link)
+
         return data_file
+
+    @classmethod
+    def stamp_device(cls, station_link):
+        """Note on the machine that something of its arrived.
+
+        The one write that keeps :attr:`AgentDevice.last_file_received_at`
+        true. Here rather than in the upload view because this is the method
+        a file is taken delivery of by -- the view's path, and the one the
+        tests stage files through -- so the stamp cannot be missed by a
+        caller that stored a file some other way.
+
+        Written unconditionally: a machine pushing a backlog updates one row
+        per file, which is a sub-millisecond write beside an upload that
+        just crossed a satellite link. Coarsening it to save those writes
+        would buy nothing and cost an explanation of how stale the column is
+        allowed to be.
+        """
+        AgentDevice.objects.filter(
+            pk=station_link.network_connection.device_id
+        ).update(last_file_received_at=dj_timezone.now())
 
     #: Written by both outcomes, so that neither can quietly leave a field
     #: from the other run's verdict standing.

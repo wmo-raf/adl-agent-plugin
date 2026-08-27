@@ -25,8 +25,10 @@ from adl_agent_plugin.models import AgentDevice, AgentDeviceStateTransition
 from .helpers import (
     at_time,
     bearer,
+    create_connection,
     create_station_link,
     paired_device,
+    stage_file,
     wire_datetime,
 )
 
@@ -337,6 +339,141 @@ class LivenessLadderTests(HeartbeatTestCase):
         self.device.revoke()
 
         self.assertEqual(self.believed(minutes=1).state, LivenessState.UNKNOWN)
+
+
+class ArrivingFilesAreProgressTests(HeartbeatTestCase):
+    """A machine pushing a backlog is working, and must not be called stuck.
+
+    The agent stamps a cycle only once it has been round every station on the
+    box, so a machine working through a first bind's backlog goes hours
+    without one while sending files the whole time. Reading cycles alone
+    called exactly that machine stuck (wmo-raf/adl#303).
+
+    Files are made to arrive the way they really arrive -- through
+    ``record_upload``, which is the method the upload endpoint takes delivery
+    by. Nothing here writes ``last_file_received_at``.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.link = create_station_link(
+            connection=create_connection(device=self.device)
+        )
+
+    def stale_cycle(self, minutes=120):
+        """A machine heartbeating now, whose last finished cycle is old."""
+        self.heartbeat({"last_cycle": {
+            "completed_at": wire_datetime(
+                dj_timezone.now() - timedelta(minutes=minutes)
+            ),
+        }})
+
+    def test_a_machine_still_sending_files_is_not_stuck(self):
+        self.stale_cycle()
+        stage_file(self.link, "GAR_0220.dat", b"one,two\n")
+
+        self.assertEqual(self.believed(minutes=1).state, LivenessState.ONLINE)
+
+    def test_a_machine_that_has_stopped_sending_is_stuck(self):
+        # The same stale cycle, and the last file arrived well outside the
+        # window. Nothing is moving, and that is what the alarm is for.
+        self.stale_cycle()
+
+        with at_time(dj_timezone.now() - timedelta(minutes=30)):
+            stage_file(self.link, "GAR_0220.dat", b"one,two\n")
+
+        self.assertEqual(self.believed(minutes=1).state,
+                         LivenessState.CYCLE_STUCK)
+
+    def test_a_machine_that_has_never_sent_anything_is_still_stuck(self):
+        # The narrowing must not become an amnesty. A station bound to a
+        # folder that does not exist sends nothing, for ever, and the machine
+        # carrying it is exactly the one an operator has to be told about.
+        self.stale_cycle()
+
+        self.assertEqual(self.believed(minutes=1).state,
+                         LivenessState.CYCLE_STUCK)
+
+    def test_an_idle_machine_still_proves_itself_with_cycles(self):
+        # The other half of the pair: nothing has ever arrived from this
+        # machine because there is nothing to send, and it says so by
+        # finishing an empty cycle every five minutes.
+        self.heartbeat({"last_cycle": {
+            "completed_at": wire_datetime(dj_timezone.now()),
+        }})
+
+        self.assertEqual(self.believed(minutes=1).state, LivenessState.ONLINE)
+
+    def test_the_window_is_the_one_the_cycle_check_uses(self):
+        # Five-minute cadence, multiplier of two, so the same ten minutes
+        # bounds both halves of the question -- there is no second threshold
+        # to configure and none to get wrong. Asserted either side of it
+        # rather than on it: the boundary second is nobody's requirement.
+        self.stale_cycle()
+
+        with at_time(dj_timezone.now() - timedelta(minutes=12)):
+            stage_file(self.link, "GAR_0220.dat", b"one,two\n")
+
+        self.assertEqual(self.believed(minutes=1).state,
+                         LivenessState.CYCLE_STUCK)
+
+        with at_time(dj_timezone.now() - timedelta(minutes=4)):
+            stage_file(self.link, "GAR_0221.dat", b"one,two\n")
+
+        self.assertEqual(self.believed(minutes=1).state, LivenessState.ONLINE)
+
+    def test_silence_still_outranks_a_machine_that_was_sending(self):
+        # Arrivals speak for a machine that is talking. One that has stopped
+        # heartbeating is offline however busy it was a quarter of an hour
+        # ago, and somebody has to walk to it.
+        self.stale_cycle()
+        stage_file(self.link, "GAR_0220.dat", b"one,two\n")
+
+        self.assertEqual(self.believed(minutes=16).state,
+                         LivenessState.OFFLINE)
+
+    def test_the_verdict_says_a_backlog_is_a_backlog(self):
+        # Green on the arrivals, and the sentence has to say so -- otherwise
+        # it reports a scan cycle two hours old beside a verdict of "fine".
+        self.stale_cycle()
+        stage_file(self.link, "GAR_0220.dat", b"one,two\n")
+
+        message = self.believed(minutes=1).message
+
+        self.assertIn("backlog", message)
+        self.assertIn(self.device.name, message)
+
+    def test_working_it_off_returns_the_machine_to_an_ordinary_sentence(self):
+        # Once a cycle finally lands, the backlog sentence goes away rather
+        # than sticking to the machine that had one.
+        self.stale_cycle()
+        stage_file(self.link, "GAR_0220.dat", b"one,two\n")
+        self.heartbeat({"last_cycle": {
+            "completed_at": wire_datetime(dj_timezone.now()),
+        }})
+
+        self.assertNotIn("backlog", self.believed(minutes=1).message)
+
+    def test_an_upload_is_what_stamps_the_machine(self):
+        # The column exists only because health.py may not query for it, so
+        # the one thing that must be true is that storing a file writes it.
+        self.assertIsNone(self.device.last_file_received_at)
+
+        stage_file(self.link, "GAR_0220.dat", b"one,two\n")
+
+        self.device.refresh_from_db()
+        self.assertIsNotNone(self.device.last_file_received_at)
+
+    def test_the_ladder_asks_no_questions_of_the_database(self):
+        # The whole reason the fact is on the device rather than queried out
+        # of the file ledger. liveness_of runs on a rendering path and inside
+        # the one source check in the fleet that performs no I/O at all.
+        self.stale_cycle()
+        stage_file(self.link, "GAR_0220.dat", b"one,two\n")
+        self.device.refresh_from_db()
+
+        with self.assertNumQueries(0):
+            liveness_of(self.device, dj_timezone.now())
 
 
 class ClockSkewAdvisoryTests(HeartbeatTestCase):

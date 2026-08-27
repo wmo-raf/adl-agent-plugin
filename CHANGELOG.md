@@ -13,6 +13,51 @@ notes** section listing the migrations it ships and anything an operator must do
 This file starts at 0.2.0, which is the first tagged release. Earlier history is
 in the git log.
 
+## [Unreleased]
+
+### Fixed
+
+- **A machine working through a backlog is no longer called stuck.** *Cycle
+  stuck* now means **no progress** — heartbeats fresh, and for over 2× the check
+  interval neither a scan cycle completed **nor a file arrived** — rather than
+  simply *no completed cycle*
+  ([wmo-raf/adl#303](https://github.com/wmo-raf/adl/issues/303)).
+
+  The agent stamps a completed cycle only once it has been round every station
+  on the machine, so a server pushing a first bind's backlog goes hours without
+  one while uploading the whole time. Every deployment hits this the first time
+  an administrator binds a station with history behind it, and it showed as a
+  permanently amber machine that was in fact working hardest.
+
+  The two signals are complementary and neither works alone: an idle machine
+  proves itself by finishing empty cycles and sends nothing, a busy one proves
+  itself by files arriving and finishes no cycles. The arrival window is the
+  existing cycle threshold — `ADL_AGENT_CYCLE_STUCK_MULTIPLIER` × the device's
+  check interval — so there is no new setting.
+
+  A machine green on arrivals rather than on a cycle stays **Online** and says
+  why in its own sentence, following the rule clock skew already sets: a finding
+  about a machine that is otherwise fine belongs in the message, not in the
+  state. The device page shows *Last file received* beside *Last completed scan
+  cycle*, so the verdict can be read off the page.
+
+  The alarm is narrowed, not removed. A machine that is heartbeating and sending
+  nothing — a station bound to a folder that does not exist, say — is still
+  reported stuck, and silence still outranks stuckness.
+
+### Upgrade notes
+
+Ships one migration:
+
+- `0012_agentdevice_last_file_received_at` — adds `AgentDevice.last_file_received_at`,
+  null on every existing row. Correctly so: nothing has been stamped yet. A
+  machine that is genuinely working stamps it on its next upload; one that is not
+  keeps the verdict it already had. Nothing to do before running it.
+
+No new settings, and no wire change: this is computed from what ADL already
+stores, so it takes effect on every machine in the fleet regardless of which
+agent version it is running.
+
 ## [0.3.0] — 2026-08-26
 
 ### Added
