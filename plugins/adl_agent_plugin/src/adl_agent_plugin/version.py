@@ -18,6 +18,6 @@ the string here and the string in the manifest are the same characters.
 
 #: Bumped at release, in step with the tag. See the release convention in
 #: the ADL core CLAUDE.md: ``gh release create 0.5.0``, never ``git tag -a``.
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 __version__ = VERSION
