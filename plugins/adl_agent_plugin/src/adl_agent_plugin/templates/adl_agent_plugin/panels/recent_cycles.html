@@ -1,0 +1,62 @@
+{% load i18n %}
+
+{% comment %}
+    Rendered inside the agent device and agent station link edit forms. A
+    form fragment with no CSS of its own, like the two panels beside it: a
+    plain listing table and Wagtail's help-block idiom.
+
+    Every number here is what a machine reported. Nothing on this page is
+    ADL's to set, so nothing on it is a form field.
+{% endcomment %}
+
+{% if passes %}
+    <table class="listing">
+        <thead>
+            <tr>
+                <th scope="col">{% trans "Started" %}</th>
+                {% if show_station %}<th scope="col">{% trans "Station" %}</th>{% endif %}
+                <th scope="col">{% trans "Outcome" %}</th>
+                <th scope="col">{% trans "Trigger" %}</th>
+                <th scope="col">{% trans "Scanned" %}</th>
+                <th scope="col">{% trans "Uploaded" %}</th>
+                <th scope="col">{% trans "Failed" %}</th>
+                <th scope="col">{% trans "Did not arrive" %}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for pass in passes %}
+                <tr>
+                    <td>{{ pass.time }}</td>
+                    {% if show_station %}<td>{{ pass.station_link.station }}</td>{% endif %}
+                    <td>{{ pass.outcome_label }}</td>
+                    <td>{{ pass.get_trigger_display|default:"—" }}</td>
+                    {% comment %}
+                        default_if_none, not default: a zero here is the
+                        machine saying it looked and found nothing, and an
+                        em dash is it saying nothing at all. Those are
+                        different faults.
+                    {% endcomment %}
+                    <td>{{ pass.scanned|default_if_none:"—" }}</td>
+                    <td>{{ pass.uploaded|default_if_none:"—" }}</td>
+                    <td>{{ pass.failed|default_if_none:"—" }}</td>
+                    <td>{{ pass.missing_summary|default:"—" }}</td>
+                </tr>
+                {% if pass.error or pass.stopped %}
+                    <tr>
+                        <td colspan="{% if show_station %}8{% else %}7{% endif %}">
+                            {{ pass.error|default:pass.stopped }}
+                        </td>
+                    </tr>
+                {% endif %}
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <p><a href="{{ listing_url }}">{% trans "Recent cycles" %}</a></p>
+{% else %}
+    <div class="help-block help-info">
+        <p>
+            {% trans "No collection passes have reached ADL yet. A machine reports them on its heartbeat, so they appear within a few minutes of its first cycle — and an agent older than this feature reports one per heartbeat rather than one per pass." %}
+        </p>
+    </div>
+{% endif %}

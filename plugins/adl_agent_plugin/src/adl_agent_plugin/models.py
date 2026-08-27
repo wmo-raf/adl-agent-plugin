@@ -9,12 +9,13 @@ from adl_ftp_plugin.utils import get_ftp_decoder_choices
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, RegexValidator
 from django.db import models, transaction
-from django.db.models import F
+from django.db.models import F, Q
 from django.db.models.signals import post_delete, post_save
 from django.utils import timezone as dj_timezone
 from django.utils.translation import gettext_lazy as _
 from modelcluster.fields import ParentalKey
 from modelcluster.models import ClusterableModel
+from timescale.db.models.models import TimescaleModel
 from timezone_field import TimeZoneField
 from wagtail.admin.panels import FieldPanel, InlinePanel, MultiFieldPanel
 from wagtail.models import Orderable
@@ -30,7 +31,11 @@ from .credentials import (
 )
 from .health import LivenessState, liveness_of, source_check_result
 from .heartbeat import MAX_OS_VERSION_LENGTH, MAX_VERSION_LENGTH
-from .panels import AgentDeviceIdentityPanel, AgentDeviceLivenessPanel
+from .panels import (
+    AgentDeviceIdentityPanel,
+    AgentDeviceLivenessPanel,
+    AgentRecentCyclesPanel,
+)
 from .validators import validate_start_date
 
 
@@ -55,6 +60,27 @@ validate_agent_release_version = RegexValidator(
         "An agent version is three numbers separated by dots, such as 1.2.0."
     ),
 )
+
+
+class AgentLogLevel(models.TextChoices):
+    """How much a machine writes to its own log.
+
+    The agent's own vocabulary -- these are .NET ``LogLevel`` names, and they
+    are spelled here so that what an operator picks in a form is a word the
+    machine can parse rather than a word it will fall back from.
+
+    ``None`` is deliberately absent. It parses on the machine and means "log
+    nothing at all", which is a country server that has silently stopped
+    keeping the only evidence anybody will have of its next bad day -- set
+    from a form on another continent. There is no support case that wants it,
+    and the agent refuses it anyway.
+    """
+
+    TRACE = "Trace", _("Trace — everything, for a few minutes")
+    DEBUG = "Debug", _("Debug — a support session")
+    INFORMATION = "Information", _("Information — the usual")
+    WARNING = "Warning", _("Warning — only what went wrong")
+    ERROR = "Error", _("Error — only what failed")
 
 
 class AgentDeviceQuerySet(models.QuerySet):
@@ -158,6 +184,31 @@ class AgentDevice(models.Model):
             "back each cycle walks the tree. Two days suits a vendor that "
             "files by day or hour. Anything older is picked up by the daily "
             "reconciliation."
+        ),
+    )
+
+    #: What ADL tells this machine to write to its own log, when it has
+    #: anything to say about it. Blank means "use whatever the machine was set
+    #: to locally", which is the same reading of silence the reconciliation
+    #: interval and the dated-folder window already get -- so clearing this
+    #: gives the machine back to whoever is standing at it rather than pinning
+    #: it to a default nobody chose.
+    #:
+    #: Here because raising a country server to Debug today means reaching the
+    #: machine, which is the exact problem this product exists to solve
+    #: (wmo-raf/adl#307). Per device and not per deployment: it is turned on
+    #: for one machine on one bad day and turned off again.
+    log_level = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        choices=AgentLogLevel.choices,
+        verbose_name=_("Log level"),
+        help_text=_(
+            "How much this machine writes to its own log. Leave blank to use "
+            "whatever the machine itself is set to. Debug is for a support "
+            "session and can be left on -- the log has a fixed size ceiling, "
+            "so what it costs is how far back the log reaches, not disk."
         ),
     )
 
@@ -310,9 +361,11 @@ class AgentDevice(models.Model):
             FieldPanel("check_interval_minutes"),
             FieldPanel("dated_folder_window_hours"),
             FieldPanel("pinned_version"),
+            FieldPanel("log_level"),
         ], heading=_("Device")),
         AgentDeviceIdentityPanel(heading=_("Identity")),
         AgentDeviceLivenessPanel(heading=_("Liveness")),
+        AgentRecentCyclesPanel("device", heading=_("Recent cycles")),
     ]
 
     class Meta:
@@ -604,7 +657,15 @@ class AgentDevice(models.Model):
         that omits its clock leaves the previous skew alone rather than
         clearing it -- the last thing ADL measured is still the last thing it
         measured.
+
+        The collection history the beat carries is stored after all of that
+        and never before it. A beat's first job is to say the machine is
+        alive, which is the one fact the whole liveness ladder rests on; a
+        pass that could not be stored must not be able to cost it
+        (wmo-raf/adl#307).
         """
+        from .cycles import record_passes
+
         now = now or dj_timezone.now()
 
         changes = {
@@ -629,6 +690,8 @@ class AgentDevice(models.Model):
 
         for field_name, value in changes.items():
             setattr(self, field_name, value)
+
+        record_passes(self, beat, now)
 
         return self.record_liveness(now)
 
@@ -1197,6 +1260,10 @@ class AgentStationLink(StationLink):
                 "connection's; the rest still apply."
             ),
         ),
+        # Last, under everything that configures the station: it is what the
+        # settings above have actually been doing, and it is read after them
+        # rather than instead of them.
+        AgentRecentCyclesPanel("station_link", heading=_("Recent cycles")),
     ] + StationLink.aggregation_panels
 
     class Meta:
@@ -1939,6 +2006,248 @@ class AgentStationDataFile(models.Model):
         }
 
 
+class AgentCyclePassTrigger(models.TextChoices):
+    """What started a pass.
+
+    The agent's own vocabulary, spelled here so the admin can label and filter
+    it. A word this ADL does not know is stored as the empty string rather
+    than shown raw -- see :func:`adl_agent_plugin.heartbeat._word`.
+    """
+
+    SCHEDULED = "scheduled", _("Scheduled")
+    RECONCILIATION = "reconciliation", _("Reconciliation sweep")
+    COLLECT = "collect", _("Collect now")
+
+
+class AgentCyclePass(TimescaleModel):
+    """One station's share of one unit pass, as the machine finished it.
+
+    The history ADL never had. ``AgentDevice.heartbeat_details`` holds the
+    last beat's counts and the beat before it is gone, which is the right
+    shape for liveness (decision #264) and the wrong one for "what has this
+    station been doing for the last fortnight". These rows are that
+    (wmo-raf/adl#307).
+
+    **A row per station link per pass**, and not one per unit with the
+    stations as JSON. A unit is a folder group, so per-unit rows would be
+    five to ten times fewer -- but they would lose the ``station_link``
+    foreign key, and the commonest question anybody has is one station's
+    history, which would then need JSON containment queries that cannot be
+    indexed the obvious way.
+
+    **Not an extension of** ``StationLinkActivityLog`` either, which looks
+    like it should cover this and does not. That model's semantics are an
+    ingestion run as ADL performed it -- its columns describe observations
+    coming out of a file ADL already holds, so it begins after the file has
+    arrived. Everything upstream of that (the walk, the pattern, the
+    stability window, the upload) is invisible to it, and folding these rows
+    in would swamp the monitoring activity list with rows carrying no
+    ``records_count`` and weld this plugin's retention to core's.
+
+    **Every pass is stored, including the uneventful ones.** Filtering was
+    considered and rejected on the numbers: a station producing a file every
+    ten minutes offers one on every cycle, so a healthy station is eventful
+    every time and filtering saves rows only on the quiet ones -- which are
+    precisely where "the agent looked and there was nothing" is the valuable
+    fact, and where its absence is indistinguishable from an agent that never
+    ran. What bounds the table instead is time: see
+    :mod:`adl_agent_plugin.cycles` for the compression and retention
+    policies.
+    """
+
+    wagtail_reference_index_ignore = True
+
+    # ``time`` is inherited from TimescaleModel and holds when the pass
+    # started -- the same instant the machine's own cycle log stamps it with,
+    # so a row here and a record there name the same pass.
+
+    #: Denormalised from ``station_link.network_connection.device``, because
+    #: the fleet-wide question this table makes askable for the first time --
+    #: every failed pass this week, across every machine -- is a filter, and
+    #: a filter has to be a query. Set once, at write time; a station link
+    #: moved to another device leaves its old rows saying which machine
+    #: actually made them, which is what history is for.
+    device = models.ForeignKey(
+        "AgentDevice", on_delete=models.CASCADE, related_name="cycle_passes",
+        verbose_name=_("Device"),
+    )
+    station_link = models.ForeignKey(
+        AgentStationLink, on_delete=models.CASCADE, related_name="cycle_passes",
+        verbose_name=_("Agent Station Link"),
+    )
+
+    #: The folder the unit is named by: the first one it walked. There is no
+    #: stable unit id anywhere in this product, and inventing one to store
+    #: would be inventing a fact.
+    unit = models.CharField(
+        max_length=500, blank=True, verbose_name=_("Unit"),
+        help_text=_("The folder this pass is named by."),
+    )
+    trigger = models.CharField(
+        max_length=20, blank=True,
+        choices=AgentCyclePassTrigger.choices,
+        verbose_name=_("Trigger"),
+    )
+    completed = models.BooleanField(
+        default=False, verbose_name=_("Completed"),
+        help_text=_(
+            "False when the pass was cut short, and then the reason says why."
+        ),
+    )
+    stopped = models.TextField(
+        blank=True, default="", verbose_name=_("Stopped Because"),
+    )
+    duration_ms = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("Duration (ms)"),
+    )
+    #: How many folders the walk actually covered. For a station filed by date
+    #: these are the dated sub-folders the cycle expanded to, and the number
+    #: is the difference between "the vendor has stopped writing" and "the
+    #: agent is looking in yesterday".
+    folders_walked = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("Folders Walked"),
+    )
+
+    # ---------- what this station did ----------
+    #
+    # All nullable, and the tri-state matters: NULL is "the machine did not
+    # say", 0 is "it looked and there was nothing". A quiet station and a
+    # station whose agent is too old to count are different faults.
+
+    scanned = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("Scanned"),
+        help_text=_("Files in the folder matching this station's pattern."),
+    )
+    held = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("Held"),
+        help_text=_("Files left alone because they were still being written."),
+    )
+    offered = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("Offered"),
+    )
+    wanted = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("Wanted"),
+        help_text=_("Files ADL asked for out of what was offered."),
+    )
+    uploaded = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("Uploaded"),
+    )
+    failed = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("Failed"),
+    )
+    backlog = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("Backlog"),
+        help_text=_("What the machine held that ADL did not."),
+    )
+    error = models.TextField(
+        blank=True, default="", verbose_name=_("Error"),
+        help_text=_(
+            "What went wrong for this station, including the reason a station "
+            "the scan turned away was turned away."
+        ),
+    )
+
+    #: Up to a few names of files this pass saw and ADL never received, each
+    #: with its outcome and reason. About a hundred bytes, and the point of
+    #: the whole model: ADL already stores the name of every file it *did*
+    #: receive, and this is the negative space -- held as partial, failed to
+    #: upload, or sitting in the folder matching nobody's pattern. There is no
+    #: new privacy exposure in it for the same reason.
+    missing_files = models.JSONField(
+        default=list, blank=True, verbose_name=_("Files That Did Not Arrive"),
+    )
+
+    #: When ADL took delivery of the pass, as against when the machine made
+    #: it. The gap between the two is how long that machine was unable to
+    #: reach here, which nothing else on the row says.
+    received_at = models.DateTimeField(verbose_name=_("Received At"))
+
+    class Meta:
+        verbose_name = _("Agent Cycle Pass")
+        verbose_name_plural = _("Agent Cycle Passes")
+        get_latest_by = "time"
+        ordering = ["-time"]
+        indexes = [
+            # "this station's fortnight", which is the question the whole
+            # model exists for.
+            models.Index(fields=["station_link", "time"],
+                         name="idx_agentpass_link_time"),
+            # "this machine's day".
+            models.Index(fields=["device", "time"],
+                         name="idx_agentpass_device_time"),
+            # "every failed pass this week, across every machine" -- the
+            # fleet-wide question nobody could ask at all before this.
+            models.Index(fields=["time"], name="idx_agentpass_cutshort",
+                         condition=Q(completed=False)),
+        ]
+
+    def __str__(self):
+        return f"{self.station_link} - {self.time:%Y-%m-%d %H:%M}"
+
+    @property
+    def outcome(self):
+        """One word for how this pass went, for a listing to show.
+
+        Derived rather than stored: it is three of this row's own columns read
+        together, and a stored copy is a copy that can disagree with them.
+        """
+        if not self.completed:
+            return AgentCyclePassOutcome.CUT_SHORT
+
+        if self.failed:
+            return AgentCyclePassOutcome.FAILED
+
+        if self.uploaded:
+            return AgentCyclePassOutcome.DELIVERED
+
+        return AgentCyclePassOutcome.QUIET
+
+    def outcome_label(self):
+        return AgentCyclePassOutcome.LABELS[self.outcome]
+
+    outcome_label.short_description = _("Outcome")
+
+    def missing_summary(self):
+        """The names of what did not arrive, short enough for a listing.
+
+        The column an operator scans for the answer to "why has this station
+        gone quiet", which is why it is a column and not something to open a
+        row for.
+        """
+        names = [
+            file.get("name") for file in (self.missing_files or [])
+            if isinstance(file, dict) and file.get("name")
+        ]
+
+        return ", ".join(names)
+
+    missing_summary.short_description = _("Did Not Arrive")
+
+
+class AgentCyclePassOutcome:
+    """How a pass went, in one word.
+
+    Not a model field and not a ``TextChoices``: these are read off columns
+    the machine reported, so storing them would be storing a second opinion
+    about facts the row already holds. The labels live here so the listing and
+    the filter cannot spell them differently.
+    """
+
+    DELIVERED = "delivered"
+    QUIET = "quiet"
+    FAILED = "failed"
+    CUT_SHORT = "cut_short"
+
+    LABELS = {
+        DELIVERED: _("Delivered"),
+        QUIET: _("Nothing to send"),
+        FAILED: _("Files failed"),
+        CUT_SHORT: _("Cut short"),
+    }
+
+    CHOICES = list(LABELS.items())
+
+
 class AgentStationLinkVariableMapping(Orderable):
     """The per-station half of Pattern C -- the one awkward station."""
 
@@ -2369,9 +2678,10 @@ def _bump_owning_device(sender, instance, **kwargs):
 
 
 def _bump_device_itself(sender, instance, created, update_fields=None, **kwargs):
-    # The device row carries two pieces of configuration -- its check
-    # interval and its dated folder window -- and the credential writes
-    # beside them (a rotation, a revoke) change nothing an agent caches.
+    # The device row carries three pieces of configuration -- its check
+    # interval, its dated folder window and the log level ADL may impose --
+    # and the credential writes beside them (a rotation, a revoke) change
+    # nothing an agent caches.
     # Those name their fields, so they are told apart from an administrator
     # saving the edit form, which names none.
     #
@@ -2380,7 +2690,9 @@ def _bump_device_itself(sender, instance, created, update_fields=None, **kwargs)
     if created:
         return
 
-    configuration = {"check_interval_minutes", "dated_folder_window_hours"}
+    configuration = {
+        "check_interval_minutes", "dated_folder_window_hours", "log_level",
+    }
 
     if update_fields is None or configuration & set(update_fields):
         instance.bump_config_version()

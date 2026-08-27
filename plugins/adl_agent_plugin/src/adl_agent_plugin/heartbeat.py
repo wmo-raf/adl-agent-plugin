@@ -40,6 +40,67 @@ CYCLE_COUNTS = ("scanned", "offered", "uploaded", "failed")
 MAX_CYCLE_LINKS = 500
 MAX_VOLUMES = 32
 
+#: Per-pass counts kept from each station's line of a completed pass. Fixed,
+#: exactly as ``CYCLE_COUNTS`` is and for the same reason: a future agent
+#: adding a field cannot grow ADL's stored row without ADL being taught what
+#: the field means.
+PASS_COUNTS = (
+    "scanned", "held", "offered", "wanted", "uploaded", "failed", "backlog",
+)
+
+#: How many finished passes one heartbeat may carry. A machine catching up
+#: after a long outage empties its queue over several beats rather than in one
+#: body ADL has to hold whole; the agent bounds its own side to the same
+#: number.
+MAX_COMPLETED_PASSES = 200
+
+#: How many stations one pass may describe. A pass covers a unit -- a folder
+#: and whatever shares it -- so in the field this is a handful; the bound is
+#: against a machine sending nonsense, not against a real folder.
+MAX_PASS_STATIONS = 200
+
+#: How many named files a pass may say did not arrive. Three is what the agent
+#: sends; the extra room costs nothing and means a slightly more generous
+#: agent is trimmed rather than refused.
+MAX_MISSING_FILES = 5
+
+#: What a file that did not arrive was doing. Anything else is dropped rather
+#: than stored: this vocabulary is what the admin filters and reads, and a
+#: word ADL has never heard of is not something it can show anybody.
+MISSING_OUTCOMES = ("failed", "held", "unmatched")
+
+#: What started a pass. Same reasoning as the outcomes above -- a trigger ADL
+#: cannot label is stored as the empty string rather than as a word from an
+#: agent nobody here has read.
+PASS_TRIGGERS = ("scheduled", "reconciliation", "collect")
+
+
+@dataclass(frozen=True)
+class CyclePass:
+    """One unit pass, checked, as the machine finished it.
+
+    A pass is a folder group walked once: what it looked in, what each of its
+    stations did, and a few of the files it saw and did not deliver. The
+    counts here are the same ones ``last_cycle`` carries, and the difference
+    is entirely one of lifetime -- ``last_cycle`` is a snapshot the next beat
+    overwrites, and a pass is a row.
+    """
+
+    at: Optional[datetime] = None
+    seconds: Optional[float] = None
+    unit: str = ""
+    trigger: str = ""
+    completed: bool = False
+    stopped: str = ""
+    folders: Optional[int] = None
+    stations: Tuple[dict, ...] = field(default_factory=tuple)
+    #: Up to a few files this pass saw and ADL never received, with the
+    #: reason. ADL stores the name of every file it *did* receive; this is
+    #: the negative space, and the difference between "this station is quiet"
+    #: and "this station is quiet because the files are now called something
+    #: else".
+    missing: Tuple[dict, ...] = field(default_factory=tuple)
+
 
 @dataclass(frozen=True)
 class Heartbeat:
@@ -55,6 +116,17 @@ class Heartbeat:
     last_cycle_completed_at: Optional[datetime] = None
     links: Tuple[dict, ...] = field(default_factory=tuple)
     volumes: Tuple[dict, ...] = field(default_factory=tuple)
+    #: The passes that finished on the machine since the last beat ADL
+    #: accepted -- ``None`` from an agent too old to have the field at all,
+    #: which is a normal long-lived state and not a fault, and an empty tuple
+    #: from a new one that simply had nothing to say. The two are different
+    #: instructions: the first means "fall back to ``last_cycle``", the second
+    #: means "this machine has already told you everything".
+    passes: Optional[Tuple[CyclePass, ...]] = None
+    #: Passes the machine made and could not keep, because ADL was
+    #: unreachable for longer than its queue is deep. Recorded rather than
+    #: left as an unexplained gap in the history.
+    dropped_passes: Optional[int] = None
 
     def details(self):
         """The half of the report that has no column of its own.
@@ -71,6 +143,10 @@ class Heartbeat:
             "backlog_count": self.backlog_count,
             "links": list(self.links),
             "volumes": list(self.volumes),
+            # Not a history -- the history is rows, in ``AgentCyclePass``.
+            # This is the last beat's word on how much of it never got here,
+            # which belongs beside the rest of what the machine last said.
+            "dropped_passes": self.dropped_passes,
         }
 
 
@@ -89,6 +165,7 @@ def read_details(stored):
         "backlog_count": stored.get("backlog_count"),
         "links": stored.get("links") or [],
         "volumes": stored.get("volumes") or [],
+        "dropped_passes": stored.get("dropped_passes"),
     }
 
 
@@ -118,6 +195,9 @@ def read_heartbeat(payload):
                                         "last_cycle.completed_at"),
         links=_links(cycle.get("links")),
         volumes=_volumes(payload.get("disk")),
+        passes=_passes(payload.get("completed_passes")),
+        dropped_passes=_count(payload.get("dropped_passes"),
+                              "dropped_passes"),
     )
 
 
@@ -233,6 +313,207 @@ def _links(value):
         links.append(entry)
 
     return tuple(links)
+
+
+def _passes(value):
+    """The unit passes that finished on the machine since the last beat.
+
+    The history ``last_cycle`` cannot be. A beat overwrites the snapshot, so
+    before this ADL held exactly one cycle's worth of what a machine had been
+    doing and threw away the one before it -- which is the right shape for
+    liveness and the wrong one for "what has this station been doing for the
+    last fortnight" (wmo-raf/adl#307).
+
+    A fixed set of fields is read from each pass, never the whole object, for
+    the same reason ``CYCLE_COUNTS`` is fixed: an agent is on the other end of
+    this, it updates itself, and a field ADL has not been taught the meaning
+    of is a column ADL cannot show anybody.
+
+    Absent is normal and permanent, not a fault. Agents auto-update through
+    the release feed and ADL instances are upgraded by a person, one country
+    at a time, so an old agent talking to this plugin is a long-lived state --
+    and what it sends instead is ``last_cycle``, which
+    :meth:`AgentDevice.record_heartbeat` turns into one pass per beat.
+    """
+    if value is None:
+        # Absent, not empty. See ``Heartbeat.passes``.
+        return None
+
+    if not isinstance(value, list):
+        raise _invalid(_("completed_passes must be a list."))
+
+    if len(value) > MAX_COMPLETED_PASSES:
+        raise _invalid(
+            _("Report at most %(limit)s completed passes per heartbeat.")
+            % {"limit": MAX_COMPLETED_PASSES}
+        )
+
+    return tuple(_pass(raw, index) for index, raw in enumerate(value))
+
+
+def _pass(raw, index):
+    if not isinstance(raw, dict):
+        raise _invalid(
+            _("completed_passes[%(index)s] must be an object.")
+            % {"index": index}
+        )
+
+    where = "completed_passes[%s]" % index
+
+    return CyclePass(
+        at=_moment(raw.get("at"), f"{where}.at"),
+        seconds=_seconds(raw.get("seconds"), f"{where}.seconds"),
+        # The folder the unit is named by. There is no stable unit id
+        # anywhere in this product and inventing one to store would be
+        # inventing a fact.
+        unit=_text(raw.get("unit"), f"{where}.unit", 500),
+        trigger=_word(raw.get("trigger"), f"{where}.trigger", PASS_TRIGGERS),
+        completed=_flag(raw.get("completed"), f"{where}.completed"),
+        stopped=_text(raw.get("stopped"), f"{where}.stopped", 500),
+        folders=_count(raw.get("folders"), f"{where}.folders"),
+        stations=_pass_stations(raw.get("stations"), where),
+        missing=_missing(raw.get("missing"), where),
+    )
+
+
+def _pass_stations(value, where):
+    """Each station's share of one pass, one entry per station link."""
+    if value is None:
+        return ()
+
+    if not isinstance(value, list):
+        raise _invalid(
+            _("%(field)s.stations must be a list.") % {"field": where}
+        )
+
+    if len(value) > MAX_PASS_STATIONS:
+        raise _invalid(
+            _("Report at most %(limit)s stations per pass.")
+            % {"limit": MAX_PASS_STATIONS}
+        )
+
+    stations = []
+
+    for index, raw in enumerate(value):
+        if not isinstance(raw, dict):
+            raise _invalid(
+                _("%(field)s.stations[%(index)s] must be an object.")
+                % {"field": where, "index": index}
+            )
+
+        station_link_id = _count(raw.get("station_link_id"), "station_link_id")
+
+        if station_link_id is None:
+            # The same rule the cycle snapshot has: counts nobody can
+            # attribute to a station are not a report.
+            raise _invalid(
+                _("%(field)s.stations[%(index)s] must name its "
+                  "station_link_id.")
+                % {"field": where, "index": index}
+            )
+
+        station = {"station_link_id": station_link_id}
+        station.update({
+            name: _count(raw.get(name), name) for name in PASS_COUNTS
+        })
+        station["error"] = _text(raw.get("error"), "error", 500)
+
+        stations.append(station)
+
+    return tuple(stations)
+
+
+def _missing(value, where):
+    """The files this pass saw and ADL never received.
+
+    Held back as still being written, failed on the way, or sitting in the
+    folder matching nobody's pattern. That last one is the reason the field
+    exists: a vendor that renamed its files looks, from every other number in
+    this product, exactly like a folder with nothing in it.
+    """
+    if value is None:
+        return ()
+
+    if not isinstance(value, list):
+        raise _invalid(
+            _("%(field)s.missing must be a list.") % {"field": where}
+        )
+
+    if len(value) > MAX_MISSING_FILES:
+        raise _invalid(
+            _("Report at most %(limit)s missing files per pass.")
+            % {"limit": MAX_MISSING_FILES}
+        )
+
+    files = []
+
+    for index, raw in enumerate(value):
+        if not isinstance(raw, dict):
+            raise _invalid(
+                _("%(field)s.missing[%(index)s] must be an object.")
+                % {"field": where, "index": index}
+            )
+
+        name = _text(raw.get("name"), "name", 255)
+
+        if not name:
+            # A file with no name is the shape of an answer without being
+            # one, and this field is nothing but names.
+            continue
+
+        files.append({
+            "name": name,
+            "outcome": _word(
+                raw.get("outcome"), "outcome", MISSING_OUTCOMES),
+            "reason": _text(raw.get("reason"), "reason", 255),
+            "station_link_id": _count(
+                raw.get("station_link_id"), "station_link_id"),
+        })
+
+    return tuple(files)
+
+
+def _flag(value, field_name):
+    """A yes or a no, or ``False`` when nothing was reported."""
+    if value is None:
+        return False
+
+    if not isinstance(value, bool):
+        raise _invalid(
+            _("%(field)s must be true or false.") % {"field": field_name}
+        )
+
+    return value
+
+
+def _seconds(value, field_name):
+    """How long something took, or ``None``. Never negative."""
+    if value is None:
+        return None
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _invalid(_("%(field)s must be a number.") % {"field": field_name})
+
+    if value < 0:
+        raise _invalid(
+            _("%(field)s cannot be negative.") % {"field": field_name}
+        )
+
+    return float(value)
+
+
+def _word(value, field_name, vocabulary):
+    """One of a closed set of words, or the empty string.
+
+    Dropped rather than refused when it is not one of them. These vocabularies
+    are what the admin filters and labels, so a word this ADL has never heard
+    of is not something it can show anybody -- but an agent using one is a
+    newer agent, not a broken one, and refusing its beat would cost the
+    liveness signal to save a label.
+    """
+    text = _text(value, field_name, 50)
+
+    return text if text in vocabulary else ""
 
 
 def _volumes(value):

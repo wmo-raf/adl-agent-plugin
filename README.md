@@ -440,6 +440,20 @@ would leave an operator unable to tell whether data is still arriving. Every thr
 is settable: `ADL_AGENT_DEGRADED_AFTER_MISSED`, `ADL_AGENT_OFFLINE_AFTER_MISSED`,
 `ADL_AGENT_CYCLE_STUCK_MULTIPLIER`, `ADL_AGENT_CLOCK_SKEW_ADVISORY_SECONDS`.
 
+#### Turning a machine's log up from here
+
+A device carries an optional **log level**, and the `device` block of `sync` sends it when
+one is set. The agent prefers it over whatever the machine itself is configured with; an
+empty field sends nothing, which the agent reads as "use the local setting" — the same
+reading of silence the two cadences above get, so clearing the field gives the machine back
+to whoever is standing at it.
+
+It is here because raising a country server to `Debug` otherwise means reaching the machine,
+which is the problem this product exists to solve. Leaving one on `Debug` is safe: the
+agent's log has a fixed size ceiling, so what it costs is how far back the log reaches, not
+disk. `None` is deliberately not offered — a machine told to keep no record at all is a
+machine with nothing to show on its next bad day.
+
 #### Where it surfaces
 
 **In the connection health checklist**, as the source layer. Layer 5 asks every plugin the
@@ -483,12 +497,50 @@ append-only log of state changes. A country offline all weekend has one row sayi
 flapping shows up as what it is: a run of rows hours apart. Rows are dropped after ninety
 days, the same horizon core keeps its own connection-health transitions for.
 
+**And as collection passes, which are a different object.** A beat is a liveness signal and
+stays stateless; a *pass* — one folder group walked once — is a thing that happened, and it
+gets rows. The heartbeat carries the passes that finished on the machine since the last beat
+ADL accepted, and each station's share of each becomes one row in **Agent Cycles**: what it
+walked, what it scanned, held, offered, uploaded and lost, and **up to three names of files
+that were seen and did not arrive**, with the reason.
+
+That last field is the point of the whole thing. ADL already stores the name of every file
+it *received*; the negative space — held as partial, failed to upload, or sitting in the
+folder matching nobody's pattern any more — is where *the vendor renamed its files on the
+14th* lives, and it is the difference between "this station is quiet" and "this station is
+quiet because the files are now called something else".
+
+Every pass is stored, including the uneventful ones. Filtering was considered and rejected
+on the numbers: a station producing a file every ten minutes offers one on *every* cycle, so
+a healthy station is eventful every time — filtering saves rows only on quiet stations,
+which are precisely the ones where "the agent looked and there was nothing" is the valuable
+fact, and where its absence is indistinguishable from an agent that never ran. Time bounds
+the table instead. At 200 station links on a ten-minute interval that is ~29k rows a day,
+about a gigabyte a year raw and well under 100 MB once TimescaleDB has compressed it — a
+single country's stations, not the fleet's.
+
+| Setting                              | Default | What it is for                                  |
+|--------------------------------------|---------|-------------------------------------------------|
+| `ADL_AGENT_CYCLE_COMPRESS_AFTER_DAYS` | `7`     | When a chunk is turned into columns             |
+| `ADL_AGENT_CYCLE_RETENTION_DAYS`      | `90`    | When a chunk is dropped                         |
+
+The listing is filterable by machine, station, trigger, outcome and date — which makes
+*every failed pass this week, across every device* a question ADL can answer at all, and it
+could not before. **Recent cycles** panels on the device and station-link pages show the
+last ten and link into it already narrowed, so you arrive from whatever you were looking at.
+
+`StationLinkActivityLog` is untouched by any of this, deliberately. Its semantics are an
+ingestion run *as ADL performed it* — its columns describe observations coming out of a file
+ADL already holds — so it begins after the file has arrived, and everything upstream of that
+is invisible to it. Folding passes in would swamp the monitoring activity list with rows
+carrying no `records_count`, and weld this plugin's retention to core's.
+
 Noticing silence is ADL's own initiative, necessarily: an offline machine sends no request,
 so a sweep runs every minute, re-reads what the fleet's last reports say, and publishes the
 verdicts. It writes nothing when nothing has changed, which for a settled fleet is nearly
 every minute.
 
-Per-cycle ingestion detail is not duplicated here — it lands in the ordinary
+Per-cycle *ingestion* detail is not duplicated here — it lands in the ordinary
 `StationLinkActivityLog` through the drain, so trends come free. And alerting is not
 agent-specific: the agent surfaces states through core health and inherits whatever
 alerting core has or grows.
