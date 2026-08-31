@@ -36,6 +36,17 @@
         .device-inspect .w-panel__content {
             padding: 1rem;
         }
+        /* A collapsed panel keeps its content element in the layout --
+           Wagtail hides it with hidden="until-found", which removes the
+           children but not the box -- so the padding above would survive
+           as an empty strip inside the card. Collapse the box with it,
+           and drop the header's rule so the card closes on one border. */
+        .device-inspect .w-panel__content[hidden] {
+            padding: 0;
+        }
+        .device-inspect .w-panel:has(> .w-panel__content[hidden]) .w-panel__header {
+            border-bottom: none;
+        }
     </style>
 {% endblock %}
 
