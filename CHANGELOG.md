@@ -13,6 +13,36 @@ notes** section listing the migrations it ships and anything an operator must do
 This file starts at 0.2.0, which is the first tagged release. Earlier history is
 in the git log.
 
+## [0.6.0] — 2026-08-31
+
+### Added
+
+- **A device info page.** What a machine last reported — its liveness verdict and the
+  readings behind it, its disks, its last cycle per station, its recent state changes and
+  collection passes — is now a Wagtail inspect page of its own, reached from the device
+  listing's **Inspect** button and from a new **Device info** button on every agent
+  connection row. Before this the readout rendered as panels inside the device *edit
+  form*, which meant opening a form to read a diagnostic.
+
+  The page renders for a person: disk space through `filesizeformat` ("5.0 GB free of
+  10.0 GB") instead of raw byte counts, uptime as a duration instead of a count of
+  seconds, stations by name instead of ADL's internal link id (the id stays as the
+  fallback for a link ADL no longer has), and relative times beside the heartbeat, scan
+  cycle, last-file and state-since timestamps. Each block is a bordered card with a
+  headed grey bar, in Wagtail's own tokens so dark mode holds.
+
+### Changed
+
+- The device edit form keeps only what an administrator sets, plus the identity panel —
+  whose pairing-code deadline now also says how long the code has left ("expires in
+  14 minutes"). The liveness and recent-cycles panels moved to the inspect page; the
+  station link's recent-cycles panel is unchanged and shares its template with it.
+
+### Upgrade notes
+
+No migrations, and nothing for an operator to do. Purely an admin-UI release: no API,
+model, or agent-facing change, so it is safe to ship alongside any agent version.
+
 ## [0.5.0] — 2026-08-27
 
 ### Added
@@ -289,7 +319,8 @@ Two settings are worth knowing about, both optional and both defaulted:
 - `ADL_AGENT_RELEASE_MIRROR_ENABLED` (default `false`) — agent release mirroring
   stays off until an instance asks for it.
 
-[Unreleased]: https://github.com/wmo-raf/adl-agent-plugin/compare/0.5.0...HEAD
+[Unreleased]: https://github.com/wmo-raf/adl-agent-plugin/compare/0.6.0...HEAD
+[0.6.0]: https://github.com/wmo-raf/adl-agent-plugin/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/wmo-raf/adl-agent-plugin/compare/0.4.0...0.5.0
 [0.4.0]: https://github.com/wmo-raf/adl-agent-plugin/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/wmo-raf/adl-agent-plugin/compare/0.2.0...0.3.0
