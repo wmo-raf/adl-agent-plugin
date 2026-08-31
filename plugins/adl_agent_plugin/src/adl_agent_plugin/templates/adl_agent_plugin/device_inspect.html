@@ -60,7 +60,7 @@
             </p>
             {% if device.liveness_since %}
                 <p>
-                    {% blocktrans with since=device.liveness_since %}In this state since {{ since }}.{% endblocktrans %}
+                    {% blocktrans with since=device.liveness_since ago=device.liveness_since|timesince %}In this state since {{ since }} ({{ ago }} ago).{% endblocktrans %}
                 </p>
             {% endif %}
             {% if liveness.skew_note %}
@@ -89,7 +89,7 @@
                         and has nothing on the page to explain it.
                     {% endcomment %}
                     <th scope="row">{% trans "Last file received" %}</th>
-                    <td>{% if device.last_file_received_at %}{{ device.last_file_received_at }}{% else %}{% trans "Never" %}{% endif %}</td>
+                    <td>{% if device.last_file_received_at %}{{ device.last_file_received_at }} ({% blocktrans with since=device.last_file_received_at|timesince %}{{ since }} ago{% endblocktrans %}){% else %}{% trans "Never" %}{% endif %}</td>
                 </tr>
                 <tr>
                     <th scope="row">{% trans "Agent version" %}</th>
