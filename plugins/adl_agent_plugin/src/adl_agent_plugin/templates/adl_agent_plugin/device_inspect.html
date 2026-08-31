@@ -1,0 +1,191 @@
+{% extends "wagtailadmin/generic/inspect.html" %}
+{% load i18n wagtailadmin_tags %}
+
+{% comment %}
+    The agent device inspect page: everything the machine last reported,
+    each block a Wagtail panel section with its own heading. Context comes
+    from AgentDeviceInspectView; the base inspect view's field list is
+    ignored on purpose -- nothing on this page is a model field read back,
+    it is what a machine said.
+
+    Every value defaults visibly. An em dash is the machine saying nothing
+    at all, which on a diagnostic page is itself a reading.
+{% endcomment %}
+
+{% block main_content %}
+
+    {% fragment as status_content %}
+        <div class="help-block {{ liveness.tone }}">
+            <p>
+                <strong>{{ liveness.label }}</strong> — {{ liveness.message }}
+            </p>
+            {% if device.liveness_since %}
+                <p>
+                    {% blocktrans with since=device.liveness_since %}In this state since {{ since }}.{% endblocktrans %}
+                </p>
+            {% endif %}
+            {% if liveness.skew_note %}
+                <p>{{ liveness.skew_note }}</p>
+            {% endif %}
+        </div>
+    {% endfragment %}
+    {% include "wagtailadmin/shared/panel.html" with id="status" heading=_("Status") children=status_content %}
+
+    {% fragment as reported_content %}
+        <table class="listing">
+            <tbody>
+                <tr>
+                    <th scope="row">{% trans "Last heartbeat" %}</th>
+                    <td>{% if device.last_heartbeat_at %}{{ device.last_heartbeat_at }}{% else %}{% trans "Never" %}{% endif %}</td>
+                </tr>
+                <tr>
+                    <th scope="row">{% trans "Last completed scan cycle" %}</th>
+                    <td>{% if device.last_cycle_completed_at %}{{ device.last_cycle_completed_at }}{% else %}{% trans "Never" %}{% endif %}</td>
+                </tr>
+                <tr>
+                    {% comment %}
+                        Beside the cycle, because the verdict above is read
+                        from the two of them together. Without this row an
+                        operator sees "Online" next to a scan cycle hours old
+                        and has nothing on the page to explain it.
+                    {% endcomment %}
+                    <th scope="row">{% trans "Last file received" %}</th>
+                    <td>{% if device.last_file_received_at %}{{ device.last_file_received_at }}{% else %}{% trans "Never" %}{% endif %}</td>
+                </tr>
+                <tr>
+                    <th scope="row">{% trans "Agent version" %}</th>
+                    <td>{{ device.agent_version|default:"—" }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">{% trans "Operating system" %}</th>
+                    <td>{{ device.os_version|default:"—" }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">{% trans "Clock skew" %}</th>
+                    <td>{{ device.clock_skew_display }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">{% trans "Service uptime" %}</th>
+                    <td>{{ uptime_display|default:"—" }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">{% trans "Files waiting to be sent" %}</th>
+                    <td>{{ backlog_count|default_if_none:"—" }}</td>
+                </tr>
+                {% if dropped_passes %}
+                    {% comment %}
+                        Only when there are some. This machine was unable to
+                        reach ADL for longer than its queue is deep, so there
+                        is a gap in the Agent Cycles history that nothing else
+                        here accounts for — and a gap nobody can explain reads
+                        as a machine that stopped. Nothing is actually lost:
+                        the passes are in the machine's own cycle log.
+                    {% endcomment %}
+                    <tr>
+                        <th scope="row">{% trans "Collection passes never received" %}</th>
+                        <td>{{ dropped_passes }}</td>
+                    </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    {% endfragment %}
+    {% include "wagtailadmin/shared/panel.html" with id="reported-info" heading=_("Reported info") children=reported_content %}
+
+    {% if volumes %}
+        {% fragment as disk_content %}
+            <table class="listing">
+                <thead>
+                    <tr>
+                        <th scope="col">{% trans "Volume" %}</th>
+                        <th scope="col">{% trans "Space" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for volume in volumes %}
+                        <tr>
+                            <td>{{ volume.volume|default:"—" }}</td>
+                            <td>
+                                {% if volume.free_bytes is not None and volume.total_bytes is not None %}
+                                    {% blocktrans with free=volume.free_bytes|filesizeformat total=volume.total_bytes|filesizeformat %}{{ free }} free of {{ total }}{% endblocktrans %}
+                                {% elif volume.free_bytes is not None %}
+                                    {% blocktrans with free=volume.free_bytes|filesizeformat %}{{ free }} free{% endblocktrans %}
+                                {% elif volume.total_bytes is not None %}
+                                    {% blocktrans with total=volume.total_bytes|filesizeformat %}{{ total }} total{% endblocktrans %}
+                                {% else %}
+                                    —
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endfragment %}
+        {% include "wagtailadmin/shared/panel.html" with id="disk" heading=_("Disk") children=disk_content %}
+    {% endif %}
+
+    {% if links %}
+        {% fragment as cycle_content %}
+            <table class="listing">
+                <thead>
+                    <tr>
+                        <th scope="col">{% trans "Station" %}</th>
+                        <th scope="col">{% trans "Scanned" %}</th>
+                        <th scope="col">{% trans "Offered" %}</th>
+                        <th scope="col">{% trans "Uploaded" %}</th>
+                        <th scope="col">{% trans "Failed" %}</th>
+                        <th scope="col">{% trans "Error" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for link in links %}
+                        <tr>
+                            {% comment %}
+                                The name when ADL still has the link; the
+                                machine's number when it does not -- a link
+                                deleted since the report is still a line the
+                                machine sent.
+                            {% endcomment %}
+                            <td>{{ link.station|default:link.station_link_id }}</td>
+                            <td>{{ link.scanned|default_if_none:"—" }}</td>
+                            <td>{{ link.offered|default_if_none:"—" }}</td>
+                            <td>{{ link.uploaded|default_if_none:"—" }}</td>
+                            <td>{{ link.failed|default_if_none:"—" }}</td>
+                            <td>{{ link.error|default_if_none:"" }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endfragment %}
+        {% include "wagtailadmin/shared/panel.html" with id="last-cycle" heading=_("Last cycle, per station") children=cycle_content %}
+    {% endif %}
+
+    {% if transitions %}
+        {% fragment as transitions_content %}
+            <table class="listing">
+                <thead>
+                    <tr>
+                        <th scope="col">{% trans "When" %}</th>
+                        <th scope="col">{% trans "From" %}</th>
+                        <th scope="col">{% trans "To" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for transition in transitions %}
+                        <tr>
+                            <td>{{ transition.at }}</td>
+                            <td>{{ transition.get_from_state_display|default:"—" }}</td>
+                            <td>{{ transition.get_to_state_display }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endfragment %}
+        {% include "wagtailadmin/shared/panel.html" with id="state-changes" heading=_("Recent state changes") children=transitions_content %}
+    {% endif %}
+
+    {% fragment as passes_content %}
+        {% include "adl_agent_plugin/panels/recent_cycles.html" %}
+    {% endfragment %}
+    {% include "wagtailadmin/shared/panel.html" with id="recent-cycles" heading=_("Recent collection passes") children=passes_content %}
+
+{% endblock %}

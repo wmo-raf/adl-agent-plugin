@@ -125,8 +125,9 @@ class AgentCycleAdminTests(TestCase):
         self.assertEqual(len(response.context["object_list"]), 0)
 
     def test_the_device_page_shows_its_recent_cycles(self):
+        # The device's readout lives on its inspect page, not its edit form.
         response = self.client.get(
-            reverse("agent_devices:edit", args=[self.device.pk]),
+            reverse("agent_devices:inspect", args=[self.device.pk]),
         )
 
         self.assertEqual(response.status_code, 200)

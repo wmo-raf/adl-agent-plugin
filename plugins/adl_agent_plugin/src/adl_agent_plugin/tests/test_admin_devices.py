@@ -17,6 +17,7 @@ from .helpers import (
     clear_pair_throttle,
     create_connection,
     create_device,
+    create_station_link,
 )
 
 
@@ -110,6 +111,96 @@ class AgentDeviceAdminTests(TestCase):
         device.refresh_from_db()
         self.assertEqual(device.pairing_code, original)
         self.assertIsNone(device.revoked_at)
+
+
+@UNHASHED_STATICFILES
+class AgentDeviceInspectTests(TestCase):
+    """The device info page: what the machine last said, readable.
+
+    A page of its own rather than panels on the edit form, reached from the
+    device listing's Inspect button and from a connection row's Device info
+    button -- and rendered for a person, so bytes are sizes, seconds are
+    durations, and station links are station names.
+    """
+
+    def setUp(self):
+        self.admin = get_user_model().objects.create_superuser(
+            username="hq", email="hq@example.com", password="hq-password",
+        )
+        self.client.force_login(self.admin)
+        self.device = create_device(name="Dodoma server")
+
+    def inspect_page(self):
+        return self.client.get(
+            reverse("agent_devices:inspect", args=[self.device.pk])
+        )
+
+    def test_the_page_renders_what_the_machine_reported(self):
+        link = create_station_link(
+            create_connection(self.device, name="Vendor A")
+        )
+        self.device.heartbeat_details = {
+            "uptime_seconds": 90000,  # a day and an hour
+            "backlog_count": 3,
+            "links": [{
+                "station_link_id": link.pk,
+                "scanned": 4, "offered": 2, "uploaded": 2, "failed": 0,
+                "error": None,
+            }],
+            "volumes": [{
+                "volume": "C:\\",
+                "free_bytes": 5 * 1024 ** 3,
+                "total_bytes": 10 * 1024 ** 3,
+            }],
+            "dropped_passes": None,
+        }
+        self.device.save(update_fields=["heartbeat_details"])
+
+        response = self.inspect_page()
+
+        self.assertEqual(response.status_code, 200)
+        # Bytes as sizes, in one sentence per volume. The spaces inside a
+        # size are non-breaking: Django's filesizeformat refuses to let "10.0"
+        # and "GB" part ways at a line end.
+        self.assertContains(response, "5.0\xa0GB free of 10.0\xa0GB")
+        # Uptime as a duration, not a count of seconds.
+        self.assertContains(response, "1\xa0day")
+        self.assertNotContains(response, "90000")
+        # The station by name, not by ADL's internal link id.
+        self.assertContains(response, str(link.station))
+
+    def test_a_machine_that_never_reported_still_gets_a_page(self):
+        response = self.inspect_page()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Never")
+
+    def test_the_listing_offers_the_inspect_page(self):
+        response = self.client.get(reverse("agent_devices:index"))
+
+        self.assertContains(
+            response, reverse("agent_devices:inspect", args=[self.device.pk])
+        )
+
+    def test_the_edit_form_no_longer_carries_the_readout(self):
+        response = self.client.get(
+            reverse("agent_devices:edit", args=[self.device.pk])
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Last heartbeat")
+
+    def test_a_connection_links_to_its_device_info(self):
+        connection = create_connection(self.device, name="Vendor A")
+
+        links = connection.get_extra_model_admin_links()
+
+        self.assertEqual(len(links), 1)
+        self.assertEqual(
+            links[0]["url"],
+            reverse("agent_devices:inspect", args=[self.device.pk]),
+        )
+        self.assertEqual(links[0]["label"], "Device info")
 
 
 @UNHASHED_STATICFILES

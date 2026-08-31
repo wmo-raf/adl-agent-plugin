@@ -449,8 +449,9 @@ class FleetListingTests(HeartbeatDrivenTestCase):
             "disk": [{"volume": "C:", "free_bytes": 100, "total_bytes": 500}],
         })
 
+        # The reading lives on the inspect page, not the edit form.
         response = self.client.get(
-            reverse("agent_devices:edit", args=[self.device.pk])
+            reverse("agent_devices:inspect", args=[self.device.pk])
         )
 
         self.assertContains(response, "Windows Server 2019")
