@@ -11,6 +11,7 @@ from django.core.validators import MinValueValidator, RegexValidator
 from django.db import models, transaction
 from django.db.models import F, Q
 from django.db.models.signals import post_delete, post_save
+from django.urls import reverse
 from django.utils import timezone as dj_timezone
 from django.utils.translation import gettext_lazy as _
 from modelcluster.fields import ParentalKey
@@ -33,7 +34,6 @@ from .health import LivenessState, liveness_of, source_check_result
 from .heartbeat import MAX_OS_VERSION_LENGTH, MAX_VERSION_LENGTH
 from .panels import (
     AgentDeviceIdentityPanel,
-    AgentDeviceLivenessPanel,
     AgentRecentCyclesPanel,
 )
 from .validators import validate_start_date
@@ -364,8 +364,9 @@ class AgentDevice(models.Model):
             FieldPanel("log_level"),
         ], heading=_("Device")),
         AgentDeviceIdentityPanel(heading=_("Identity")),
-        AgentDeviceLivenessPanel(heading=_("Liveness")),
-        AgentRecentCyclesPanel("device", heading=_("Recent cycles")),
+        # What the machine reports about itself lives on the inspect page,
+        # not here: the edit form is for what an administrator sets, and the
+        # readings are a page an operator arrives at from either listing.
     ]
 
     class Meta:
@@ -956,6 +957,20 @@ class AgentConnection(NetworkConnection):
         duck-type a connection through this method.
         """
         return ftp_decoder_registry.get(self.decoder)
+
+    def get_extra_model_admin_links(self):
+        """A button through to the machine behind this connection.
+
+        The question an operator has at a quiet connection is about the
+        device -- is it up, what did it last say -- and the answer is the
+        device's inspect page. ``device_id`` rather than ``self.device``,
+        because this runs on every listing row and must not query.
+        """
+        return [{
+            "label": _("Device info"),
+            "url": reverse("agent_devices:inspect", args=[self.device_id]),
+            "icon_name": "desktop",
+        }]
 
     def check_source(self):
         """Is the machine that feeds this connection alive and cycling?

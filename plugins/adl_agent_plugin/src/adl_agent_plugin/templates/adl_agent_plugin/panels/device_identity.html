@@ -23,7 +23,7 @@
             <code>{{ pairing_code }}</code>
         </p>
         <p>
-            {% blocktrans with expires=pairing_code_expires_at %}Type this into the ADL Agent on the machine before {{ expires }}. It works once, and only once.{% endblocktrans %}
+            {% blocktrans with expires=pairing_code_expires_at left=pairing_code_expires_at|timeuntil %}Type this into the ADL Agent on the machine before {{ expires }} (expires in {{ left }}). It works once, and only once.{% endblocktrans %}
         </p>
     {% elif device.is_revoked %}
         <p>
