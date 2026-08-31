@@ -12,7 +12,25 @@
     at all, which on a diagnostic page is itself a reading.
 {% endcomment %}
 
+{% block extra_css %}
+    {{ block.super }}
+    <style>
+        /* Header bars for the readout's sections. The token, not a hex, so
+           the bars follow Wagtail's dark mode -- and grey-50 specifically,
+           which is what core's template conventions name for panel header
+           backgrounds. Scoped to this page's wrapper: the w-panel classes
+           are Wagtail's, and restyling them globally is not this page's
+           call to make. */
+        .device-inspect .w-panel__header {
+            background: var(--w-color-grey-50);
+            border-radius: 5px;
+            padding: 0.375rem 0.25rem;
+        }
+    </style>
+{% endblock %}
+
 {% block main_content %}
+    <div class="device-inspect">
 
     {% fragment as status_content %}
         <div class="help-block {{ liveness.tone }}">
@@ -188,4 +206,5 @@
     {% endfragment %}
     {% include "wagtailadmin/shared/panel.html" with id="recent-cycles" heading=_("Recent collection passes") children=passes_content %}
 
+    </div>
 {% endblock %}
