@@ -75,11 +75,11 @@
             <tbody>
                 <tr>
                     <th scope="row">{% trans "Last heartbeat" %}</th>
-                    <td>{% if device.last_heartbeat_at %}{{ device.last_heartbeat_at }}{% else %}{% trans "Never" %}{% endif %}</td>
+                    <td>{% if device.last_heartbeat_at %}{{ device.last_heartbeat_at }} ({% blocktrans with since=device.last_heartbeat_at|timesince %}{{ since }} ago{% endblocktrans %}){% else %}{% trans "Never" %}{% endif %}</td>
                 </tr>
                 <tr>
                     <th scope="row">{% trans "Last completed scan cycle" %}</th>
-                    <td>{% if device.last_cycle_completed_at %}{{ device.last_cycle_completed_at }}{% else %}{% trans "Never" %}{% endif %}</td>
+                    <td>{% if device.last_cycle_completed_at %}{{ device.last_cycle_completed_at }} ({% blocktrans with since=device.last_cycle_completed_at|timesince %}{{ since }} ago{% endblocktrans %}){% else %}{% trans "Never" %}{% endif %}</td>
                 </tr>
                 <tr>
                     {% comment %}
