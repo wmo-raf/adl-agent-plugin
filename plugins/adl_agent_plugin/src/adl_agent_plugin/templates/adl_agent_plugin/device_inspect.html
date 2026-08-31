@@ -15,16 +15,26 @@
 {% block extra_css %}
     {{ block.super }}
     <style>
-        /* Header bars for the readout's sections. The token, not a hex, so
-           the bars follow Wagtail's dark mode -- and grey-50 specifically,
-           which is what core's template conventions name for panel header
-           backgrounds. Scoped to this page's wrapper: the w-panel classes
-           are Wagtail's, and restyling them globally is not this page's
-           call to make. */
+        /* Each section as a bordered card: grey header bar, ruled off from
+           a white body. Tokens, not hexes, so the cards follow Wagtail's
+           dark mode -- grey-50 is what core's template conventions name for
+           panel header backgrounds, border-furniture what they name for
+           borders. Scoped to this page's wrapper: the w-panel classes are
+           Wagtail's, and restyling them globally is not this page's call
+           to make. */
+        .device-inspect .w-panel {
+            border: 1px solid var(--w-color-border-furniture);
+            border-radius: 5px;
+            overflow: hidden;
+        }
         .device-inspect .w-panel__header {
             background: var(--w-color-grey-50);
-            border-radius: 5px;
-            padding: 0.375rem 0.25rem;
+            border-bottom: 1px solid var(--w-color-border-furniture);
+            padding: 0.5rem 0.25rem;
+            margin: 0;
+        }
+        .device-inspect .w-panel__content {
+            padding: 1rem;
         }
     </style>
 {% endblock %}
