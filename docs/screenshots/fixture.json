@@ -1,0 +1,55 @@
+{
+  "capture": {
+    "connection": "Demo Agent Connection",
+    "ingest": true,
+    "probe": false,
+    "station_checks": [],
+    "wait": 240,
+    "present_interval": 15
+  },
+  "connection": {
+    "model": "adl_agent_plugin.AgentConnection",
+    "fields": {
+      "name": "Demo Agent Connection",
+      "plugin": "adl_agent_plugin",
+      "stations_timezone": "Africa/Nairobi",
+      "plugin_processing_interval": 1,
+      "device": "Nairobi Office PC",
+      "decoder": "toa5"
+    },
+    "children": {
+      "variable_mappings": [
+        {"adl_parameter": "Air Temperature", "file_variable_name": "AirTC_Avg", "file_variable_unit": "degC"},
+        {"adl_parameter": "Relative Humidity", "file_variable_name": "RH", "file_variable_unit": "percent"},
+        {"adl_parameter": "Atmospheric Pressure", "file_variable_name": "BP_hPa_Avg", "file_variable_unit": "hPa"},
+        {"adl_parameter": "Precipitation", "file_variable_name": "Rain_mm_Tot", "file_variable_unit": "mm"},
+        {"adl_parameter": "Wind Speed", "file_variable_name": "WS_ms_Avg", "file_variable_unit": "m/s"},
+        {"adl_parameter": "Wind Direction", "file_variable_name": "WindDir", "file_variable_unit": "degree"},
+        {"adl_parameter": "Solar Radiation", "file_variable_name": "SlrW_Avg", "file_variable_unit": "W/m^2"}
+      ]
+    }
+  },
+  "station_links": [
+    {
+      "model": "adl_agent_plugin.AgentStationLink",
+      "station": "DEMO001",
+      "fields": {
+        "local_folder_path": "C:\\CampbellSci\\LoggerNet\\DEMO001",
+        "file_pattern": "DEMO001_*.dat",
+        "listing_strategy": "enumerate"
+      }
+    },
+    {
+      "model": "adl_agent_plugin.AgentStationLink",
+      "station": "DEMO002",
+      "fields": {
+        "local_folder_path": "C:\\CampbellSci\\LoggerNet\\DEMO002",
+        "file_pattern": "DEMO002_*.dat",
+        "dir_structured_by_date": true,
+        "date_granularity": "day",
+        "month_dir_format": "m",
+        "listing_strategy": "enumerate"
+      }
+    }
+  ]
+}
