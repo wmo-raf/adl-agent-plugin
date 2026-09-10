@@ -1,0 +1,140 @@
+# Screenshot manifest for the ADL Agent Plugin guide (docs/guide.md).
+# Regenerate from the adl repo:  scripts/capture-plugin-docs.sh ../adl-plugins/adl-agent-plugin
+# Fixture (execution pass): the FTP plugin installed alongside; one Agent Device (id 1) paired
+# by a fixture script that drives the real API (pair, sync, heartbeat with last_cycle and
+# completed_passes, manifest, files upload of a sample CSV) so the device is Online and the
+# ledger holds processed rows plus one Failed row; one Agent Connection (id 1, standard CSV
+# decoder + CSV config) with two station links (1, 2); one published Agent Release (1.0.0)
+# with a dummy MSI. Viewset URL names: agent_devices, agent_releases; snippet listings under
+# /snippets/adl_agent_plugin/. Selectors are blind guesses — fix against the live pages.
+
+defaults:
+  viewport:
+  - 1440
+  - 900
+  padding: 12
+screenshots:
+- name: agent_device_form
+  url: /agent_devices/edit/1/
+  callouts:
+  - badge:
+      target: '#id_check_interval_minutes'
+      n: 1
+  - badge:
+      target: '#id_dated_folder_window_hours'
+      n: 2
+  - badge:
+      target: '#id_pinned_version'
+      n: 3
+  - badge:
+      target: '#id_log_level'
+      n: 4
+  # The <code> pairing code renders only while an unredeemed code exists.
+  # The demo device is paired — the healthy state — so this highlights the
+  # Identity panel as it reads once a machine is enrolled.
+  - highlight: '#panel-identity-content'
+  capture:
+    selector: "#w-editor-form"
+- name: agent_connection_form
+  url: /agentconnection/edit/1/
+  callouts:
+  - badge:
+      target: '#id_device'
+      n: 1
+  - badge:
+      target: '#id_decoder'
+      n: 2
+  - badge:
+      # The input itself is hidden behind the chooser widget, so it has no
+      # box to anchor a badge to; the field wrapper is the visible control.
+      target: '#panel-child-decoding-child-csv_config-wrapper'
+      n: 3
+  - badge:
+      target: '#id_stale_after_minutes'
+      n: 4
+  - badge:
+      target: '#id_file_retention_days'
+      n: 5
+  setup:
+  # The panels are flat siblings of the form, so a crop to the form runs all
+  # the way through the inline variable mappings; a height cap instead is
+  # refused, because it would cut the numbered badges.
+  - eval: "document.querySelector('#panel-variable_mappings-section').style.display = 'none'"
+  capture:
+    selector: "#w-editor-form"
+- name: agent_station_link_form
+  url: /agentstationlink/edit/1/
+  callouts:
+  - badge:
+      target: '#id_local_folder_path'
+      n: 1
+  - badge:
+      target: '#id_file_pattern'
+      n: 2
+  - badge:
+      target: '#id_listing_strategy'
+      n: 3
+  - badge:
+      target: '#id_stability_window_seconds'
+      n: 4
+  - badge:
+      target: '#id_start_date'
+      n: 5
+  capture:
+    selector: "#w-editor-form"
+    max_height: 2000
+- name: agent_devices_list
+  url: /agent_devices/
+  capture:
+    selector: main
+    max_height: 800
+- name: agent_device_inspect
+  url: /agent_devices/inspect/1/
+  callouts:
+  - badge:
+      target: '#status-section'
+      n: 1
+  - badge:
+      target: '#reported-info-section'
+      n: 2
+  - badge:
+      target: '#disk-section'
+      n: 3
+  - badge:
+      target: '#last-cycle-section'
+      n: 4
+  - badge:
+      target: '#state-changes-section'
+      n: 5
+  - badge:
+      target: '#recent-cycles-section'
+      n: 6
+  capture:
+    selector: .device-inspect
+    max_height: 2200
+- name: agent_data_files_list
+  url: /snippets/adl_agent_plugin/agentstationdatafile/?status=failed
+  capture:
+    selector: main
+    max_height: 900
+- name: agent_reprocess_confirm
+  # Wagtail's bulk-action confirmation page, addressed directly (bulk/<app>/<model>/<action>/)
+  # rather than by ticking rows; ids 1 and 2 = one Held and one Pruned row in the fixture.
+  url: /bulk/adl_agent_plugin/agentstationdatafile/reprocess/?id=1&id=2&next=/snippets/adl_agent_plugin/agentstationdatafile/
+  capture:
+    selector: main
+    max_height: 900
+- name: agent_cycles_list
+  url: /snippets/adl_agent_plugin/agentcyclepass/?device=1
+  capture:
+    selector: main
+    max_height: 900
+- name: agent_releases_list
+  url: /agent_releases/
+  capture:
+    selector: main
+    max_height: 700
+- name: agent_ingestion_diagnostic
+  url: /monitoring/connection/1/health/
+  capture:
+    selector: .health-diagnostic
